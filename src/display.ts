@@ -130,6 +130,7 @@ export function format(value:any,options:DisplayOptions={}):string {
   const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','Plan 消耗','100% 等效 Token','API 等效已知小计','计价覆盖率'];
   const table:{cells:string[];bold:boolean}[]=[];
   const dayLabel=(d:string)=>d.slice(5).replace('-','/');
+  if(v.legacy_reconciliation?.conflict_records)add('争议用量记录：'+num(v.legacy_reconciliation.conflict_records)+' 条；双方证据保留，未计入确认用量，数量待核对。',33);
   if(v.legacy_reconciliation?.pending_tokens)add('待核对的分叉 Token：'+num(v.legacy_reconciliation.pending_tokens)+'；未计入确认用量。',33);
   if(v.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(v.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
   if(v.totals?.source_unavailable_tokens)add('保留的缺源历史 Token：'+num(v.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);
@@ -180,6 +181,7 @@ export function format(value:any,options:DisplayOptions={}):string {
  if(command==='status'){
   title('Codex 用量账本 · '+safe(({pro:'Pro',plus:'Plus',free:'Free',business:'Business',enterprise:'Enterprise'} as any)[value.account?.plan]??value.account?.plan??'套餐未知'));
   quotas(value.quota??[]);section('今日用量');tokens(value.today?.totals);valuation(value.today?.current_price_valuation,value.today?.totals);
+  if(value.legacy_reconciliation?.conflict_records)add('争议用量记录：'+num(value.legacy_reconciliation.conflict_records)+' 条；双方证据保留，未计入确认用量，数量待核对。',33);
   if(value.legacy_reconciliation?.pending_tokens)add('待核对的分叉 Token：'+num(value.legacy_reconciliation.pending_tokens)+'；未计入确认用量。',33);
   if(value.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(value.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
   if(value.today?.totals?.source_unavailable_tokens)add('今日含缺源历史 Token：'+num(value.today.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);

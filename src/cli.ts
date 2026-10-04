@@ -1,3 +1,4 @@
+import {capacityView} from './capacity-policy.js';
 import {parseArgs} from 'node:util';
 import {homedir} from 'node:os';
 import {join,resolve} from 'node:path';
@@ -84,13 +85,13 @@ async function main(){
   const prices=db.rules();const rows=db.records(from,to).map(r=>({...priceUsage({...r,timestamp:now},prices),timestamp:r.timestamp}));
   return empiricalPlans(rows,db.officialQuotas(from,to),{from,to_exclusive:to,timezone:config.timezone}).filter(p=>latest.some(q=>cycleKey(q)===p.cycle));
  }
- function withEmpirical(caps:any[]){const empirical=opts.values['experimental-empirical']?empiricalCurrent():[];return caps.map(c=>({...c,estimated_capacity:null,lower_bound:null,upper_bound:null,equivalents:{},strict_reason:c.reason??'unverified_account_window_attribution',reason:c.reason??'unverified_account_window_attribution',empirical:empirical.find(p=>p.limit_id===c.limit_id&&p.slot===c.slot&&p.resets_at===c.resets_at&&p.window_duration_mins===c.window_duration_mins)??null}));}
+ function withEmpirical(caps:any[]){const empirical=opts.values['experimental-empirical']?empiricalCurrent():[];return caps.map(c=>({...capacityView(c),status:opts.values['experimental-empirical']?'experimental_unverified':'unverified',experimental:!!opts.values['experimental-empirical'],estimated_capacity:null,lower_bound:null,upper_bound:null,equivalents:{},strict_reason:c.reason??'unverified_account_window_attribution',reason:c.reason??'unverified_account_window_attribution',empirical:empirical.map(p=>capacityView(p,true)).find(p=>p.limit_id===c.limit_id&&p.slot===c.slot&&p.resets_at===c.resets_at&&p.window_duration_mins===c.window_duration_mins)??null}));}
  function estimates(){
   const latest=db.latestQuota();
   const qs=db.cycleQuotas(latest);
   const earliest=latest.filter(q=>q.resets_at!==null&&q.window_duration_mins!==null).map(q=>new Date((q.resets_at!-q.window_duration_mins!*60)*1000).toISOString()).sort()[0];
   const result=quotaEstimates(qs,earliest?db.records(earliest):[],config,db.rules());
-  db.transaction(()=>{for(const r of result)db.db.prepare('INSERT OR REPLACE INTO capacity_estimates VALUES (?,?,?)').run(hash(r.cycle),new Date().toISOString(),JSON.stringify(r));db.set('latest_estimates',result);});return result;
+  db.transaction(()=>{db.preserveEstimates('superseded');for(const r of result)db.db.prepare('INSERT OR REPLACE INTO capacity_estimates VALUES (?,?,?)').run(hash(r.cycle),new Date().toISOString(),JSON.stringify(r));db.set('latest_estimates',result);});return result;
  }
  async function sync(){
   const rollout=await syncRollouts(db,config.codex_home,db.rules(),(n,total)=>{if(process.stderr.isTTY&&!opts.values.json)console.error(`正在导入：${n}/${total} 个文件`);});

@@ -90,3 +90,8 @@ test('sample source usage still aggregates identically independently of presenta
  const p=parseLine(JSON.stringify({timestamp:'2026-10-03T15:00:00Z',type:'token_usage_record',payload:{response_id:'test',thread_id:'t',usage:{input_tokens:100,cached_input_tokens:40,output_tokens:20,total_tokens:120}}}),initialState());
  const t=aggregate(p.usage);assert.equal(t.total_tokens,120);assert.equal(t.cached_input_tokens,40);const before=structuredClone(t);format({totals:t,models:{},current_price_valuation:t},{command:'today'});assert.deepEqual(t,before);
 });
+
+test('unresolved conflict identities are explicit in human status and daily reports',()=>{
+ const v={...value,legacy_reconciliation:{conflict_records:2}};assert.match(format(v,{command:'status',now}),/争议用量记录.*2.*未计入确认用量/);
+ const report={...value.today,period:{from:'2026-10-03T00:00:00Z',to_exclusive:'2026-10-04T00:00:00Z',timezone:'UTC'},legacy_reconciliation:{conflict_records:2},daily:[],plan_cycles:[]};assert.match(format(report,{command:'report',now}),/争议用量记录.*2.*未计入确认用量/);
+});

@@ -1,3 +1,4 @@
+import {capacityView} from './capacity-policy.js';
 import type {Quota,Usage,PriceRule} from './types.js';
 import {aggregate,report,localDay,midnight,shiftDay} from './report.js';
 import {priceUsage} from './pricing.js';
@@ -104,7 +105,7 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
  const modelsCurrent=Object.fromEntries(Object.keys(base.models).map(model=>[model,{...base.models[model],current_price_valuation:aggregate(priced.filter(r=>r.model===model)),plan_percent_points:null,estimated_plan_tokens:null}]));
  const cycles=combinePlans(daily.flatMap(d=>d.plans));
  const restrict=(p:Empirical)=>{p.strict_reason='unverified_account_window_attribution';p.experimental=!!options.experimentalEmpirical;
-  if(!options.experimentalEmpirical){p.estimated_tokens=null;p.estimated_api_known_usd=null;p.rounding_only_lower=null;p.rounding_only_upper=null;p.reason??=p.strict_reason;}return p;};
+  if(!options.experimentalEmpirical){p.estimated_tokens=null;p.estimated_api_known_usd=null;p.rounding_only_lower=null;p.rounding_only_upper=null;p.reason??=p.strict_reason;}return capacityView(p,!!options.experimentalEmpirical);};
  for(const d of daily)d.plans=d.plans.map(p=>{
   const invalid=cycles.find(c=>c.cycle===p.cycle)?.flags.filter(f=>f==='percent_decrease'||f==='conflicting_snapshots')??[];
   if(invalid.length){p.flags=[...new Set([...p.flags,...invalid])];p=finish({...p,estimated_tokens:null,estimated_api_known_usd:null,rounding_only_lower:null,rounding_only_upper:null});}

@@ -37,7 +37,7 @@ test('R1 repair backup, same-ID correction, inherited removal, missing source, r
 });
 test('R1 repair preserves conflicting token facts and reports pending instead of overwriting',{skip:typeof backup!=='function'?'requires sqlite.backup':false},async()=>{
  const dir=mkdtempSync(join(tmpdir(),'cux-repair-conflict-'));try{const home=join(dir,'source');mkdirSync(join(home,'sessions'),{recursive:true});const dbPath=join(dir,'old.db'),db=new Ledger(dbPath);db.insertUsage(rows([meta('a'),usage('conflict',99)])[0]);db.close();writeFileSync(join(home,'sessions','rollout-a.jsonl'),[meta('a'),usage('conflict',100)].join('\n')+'\n');
- const preview=await repairPreview(dbPath,home,join(dir,'preview'));assert.equal(preview.token_conflicts,1);assert.equal(preview.after.tokens,99);
+ const preview=await repairPreview(dbPath,home,join(dir,'preview'));assert.equal(preview.token_conflicts,1);assert.equal(preview.after.tokens,0);const isolated=new Ledger(preview.files.repaired);assert.deepEqual(isolated.db.prepare('SELECT raw_json FROM usage_conflicts').all().map(r=>JSON.parse(r.raw_json as string).total_tokens).sort(),[100,99]);isolated.close();
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
 test('R1 interrupted correction rolls back data and repair version, then fresh preview succeeds',{skip:typeof backup!=='function'?'requires sqlite.backup':false},async()=>{

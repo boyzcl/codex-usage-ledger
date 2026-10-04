@@ -2,6 +2,7 @@ export const tokenFields = ['input_tokens','cached_input_tokens','cache_write_in
 export type TokenField = typeof tokenFields[number];
 export type Tokens = Record<TokenField, number>;
 export interface Usage extends Tokens {
+ origin_thread_id?:string;origin_source?:string;
  repair_status?:'source_unavailable';fork_ordinal_exclusive?:number|null;
  id:string; response_id:string|null; session_id:string; thread_id:string; turn_id:string|null; root_turn_id:string|null;
  timestamp:string; model:string; reasoning_effort:string|null; service_tier:string; project:string|null;
@@ -18,9 +19,9 @@ export interface Context {model:string; model_source:string; service_tier:string
 export interface ParseState extends Context {
  thread_id:string; session_id:string; parent_thread_id:string|null; created_at:string|null;
  fork_ordinal_exclusive:number|null;turn_id:string|null; root_turn_id:string|null; previous:Tokens|null; exact_turns:string[];
- contexts:Record<string,Context>; legacy_index:number; has_exact:boolean; replay_done:boolean; replay_next_index:number|null;
+ unknown_previous?:Usage|null;contexts:Record<string,Context>; legacy_index:number; has_exact:boolean; replay_done:boolean; replay_next_index:number|null;
 }
-export interface ParseOutput {usage:Usage[]; quotas:Quota[]; issues:{code:string; timestamp:string|null}[]; exactTurn?:{thread:string;turn:string};}
+export interface ParseOutput {usage:Usage[]; quotas:Quota[]; issues:{code:string; timestamp:string|null}[]; exactLink?:{legacy:string;response:string};exactTurn?:{thread:string;turn:string};}
 export type Rates={input:number;cached_input:number;cache_write:number|null;output:number};
 export interface PriceRule {
  id:string; kind:'api'|'credit'|'allowance'; model:string; processing_mode:string;

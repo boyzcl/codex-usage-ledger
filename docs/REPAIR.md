@@ -31,13 +31,15 @@ node dist/src/cli.js repair-preview \
 | `repaired.db` | 在副本上原子应用纠正，含 `repair_evidence` 和修复版本 |
 | `preview.json` | 按日期、模型、问题类型分组的前后差异、缺源/待核对统计及扫描开销 |
 
-`corrected_attribution` 表示同 ID、同 Token 事实的归因纠正。`excluded_inherited_history` 和 `excluded_superseded_by_exact` 排除有证据的重复量，原事实留在候选或修复证据中。重写或缺源后无法继续核对的候选保存在 `legacy_candidate_history`；重新构建和重复修复不会静默丢弃它们。`pending_parent_history` 表示无法核实的分叉候选，不计入确认用量。有 ordinal 分叉边界时，只以边界之前的父事件作为继承证据；旧日志无边界时只能核对连续指纹，不能承诺恢复所有历史归属。`retained_source_unavailable` 保留缺源或无法从现存源匹配的历史记录，并以 `repair_status: source_unavailable` 标记。`pending_token_fact_conflict` 保留原 Token 事实，等待人工核对，不覆盖为新计数。
+`corrected_attribution` 表示同 ID、同 Token 事实的归因纠正。`excluded_inherited_history` 和 `excluded_superseded_by_exact` 排除有证据的重复量，原事实留在候选或修复证据中。重写或缺源后无法继续核对的候选保存在 `legacy_candidate_history`；重新构建和重复修复不会静默丢弃它们。`pending_parent_history` 表示无法核实的分叉候选，不计入确认用量。有 ordinal 分叉边界时，只以边界之前的父事件作为继承证据；旧日志无边界时只能核对连续指纹，不能承诺恢复所有历史归属。`retained_source_unavailable` 保留缺源或无法从现存源匹配的历史记录，并以 `repair_status: source_unavailable` 标记。`pending_token_fact_conflict` 将同 ID 的争议双方移入 `usage_conflicts`，保留六项 Token、归因及实际已有历史金额/价格引用。未裁决争议从确认用量和活跃候选移出，合法追加继续入账。同六字段的低可信复制归因争议可由更可信的原始 owner 裁决恢复确认，历史变体保留，当前状态为 `resolved_by_owner`；六字段事实冲突保持 `open`，不会借 owner 到达清空。`pending_attribution_conflict` 同样保存同可信来源的归因矛盾；不会按最后写入者决定。预览分列争议身份数、变体数与前后确认量，冲突量为 `null`，不视为零，也不相加两个变体。
 
 修复会合并重解析中新增的日志额度快照，并用 `added_quota_snapshots` 报告新增数量；旧官方/日志快照与原始 payload 保留。相同 ID 的规范化额度字段必须一致，payload 的表示或附加元数据差异不覆盖原快照。规范化字段冲突时返回 `repair_quota_fact_conflict`，整次纠正事务回滚，保留原输入与基线备份供核对。重复修复不新增相同快照。
 
-历史金额与当前价格重估保持分开。归因未变的记录保留原金额；归因纠正仅重新核验该记录原来引用的不可变价格规则。原引用不再适用或缺失时金额为 `null`，不会静默换成当前价格或零。新恢复记录使用源时间与账本现有历史规则。价格替代关系留待下一轮。
+已知 turn 的 exact 只替代同 thread+turn 的 legacy；缺源但保留的 exact 继续支持该范围。未知 turn 必须有同源、同任务段内相邻用量事件的具体一对一链接，并同时核对时间及六字段；仅同线程或 Token 相等不足以替代。任务/turn 边界重置配对，当前有效候选中的多个 legacy 指向同 response 时保守保留。历史链接继续作为证据，时间改写产生的新候选不受旧链接阻塞。
 
-每个变化文件在读取前后做摘要和文件状态校验。`deferred_files > 0` 表示有源文件正在变化，本次未提交该文件，相关历史保留并待核对；此时不能宣称完成全量恢复。修复版本、可见记录、源证据和估计缓存的失效处理在同一事务中提交。中断留下基线和未提交纠正的副本；保留证据，使用新的输出目录重试。
+历史金额与当前价格重估保持分开。归因未变的记录保留原金额；同来源归因纠正仅重新核验该记录原来引用的不可变价格规则。原始 owner 替代低可信副本时采用 owner 在事件时间已计算的金额/引用，副本原金额仍作为证据保留。原引用不再适用或缺失时金额为 `null`，不会静默换成当前价格或零。新恢复记录使用源时间与账本现有历史规则。价格替代关系留待下一轮。
+
+每个变化文件在读取前后做摘要和文件状态校验。`deferred_files > 0` 表示有源文件正在变化，本次未提交该文件，相关历史保留并待核对；此时不能宣称完成全量恢复。修复版本、可见记录、源证据和估计缓存的失效处理在同一事务中提交。清理或替换容量缓存前，仍存在的派生原值保存至 `capacity_estimate_history`，不会补造以前已经删除的历史。中断留下基线和未提交纠正的副本；保留证据，使用新的输出目录重试。
 
 ## 验收、重复运行和回滚
 

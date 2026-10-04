@@ -1,5 +1,6 @@
 import {hash,normalizeQuota} from './quota.js';
 import {tokenFields,type Tokens,type Usage,type ParseState,type ParseOutput,type Context} from './types.js';
+import {unknownPair} from './usage-policy.js';
 import {projectJson,relevantLine} from './privacy.js';
 export function initialState():ParseState{return {thread_id:'unknown',session_id:'unknown',parent_thread_id:null,fork_ordinal_exclusive:null,created_at:null,turn_id:null,root_turn_id:null,previous:null,exact_turns:[],contexts:{},legacy_index:0,has_exact:false,replay_done:false,replay_next_index:null,model:'unknown',model_source:'unknown',service_tier:'unknown',reasoning_effort:null,project:null};}
 export function tokens(raw:any):Tokens|null {
@@ -27,8 +28,8 @@ export function parseLine(line:string,s:ParseState):ParseOutput {
   s.fork_ordinal_exclusive=Number.isSafeInteger(p.forked_from_ordinal_exclusive)&&p.forked_from_ordinal_exclusive>=0?p.forked_from_ordinal_exclusive:null;
   if(typeof p.cwd==='string')s.project=p.cwd;return out;
  }
- if(typ==='task_started'){s.turn_id=p.turn_id??null;s.root_turn_id=p.root_turn_id??null;return out;}
- if(typ==='turn_context'){
+ if(typ==='task_started'){s.unknown_previous=null;s.turn_id=p.turn_id??null;s.root_turn_id=p.root_turn_id??null;return out;}
+ if(typ==='turn_context'){s.unknown_previous=null;
   s.turn_id=p.turn_id??s.turn_id;s.root_turn_id=p.root_turn_id??s.root_turn_id;applyContext(s,p,'turn_context');
   if(s.turn_id)s.contexts[s.turn_id]=context(s);return out;
  }
@@ -47,12 +48,14 @@ export function parseLine(line:string,s:ParseState):ParseOutput {
   const inherited=owner!==s.thread_id||(!!s.created_at&&Date.parse(stamp!)<Date.parse(s.created_at));
   const inconsistent=t.cached_input_tokens+t.cache_write_input_tokens>t.input_tokens||t.reasoning_output_tokens>t.output_tokens||t.total_tokens!==t.input_tokens+t.output_tokens;
   if(inconsistent)issue('inconsistent_token_components');
-  return {...t,id:identity,response_id:payload.response_id??null,session_id:payload.session_id??s.session_id,thread_id:owner,turn_id:turn,root_turn_id:payload.root_turn_id??s.root_turn_id,timestamp:stamp!,model:payload.model??c.model,model_source:payload.model?'response':c.model_source,reasoning_effort:payload.reasoning_effort??c.reasoning_effort,service_tier:payload.service_tier??c.service_tier,project:c.project,uncached_input_tokens:Math.max(t.input_tokens-t.cached_input_tokens-t.cache_write_input_tokens,0),source,attribution_quality:payload.model?'explicit':c.model==='unknown'?'unknown':owner===s.thread_id?'context':'inherited',data_quality:inconsistent?'inconsistent':source==='token_usage_record'?'provider_reported':source==='compaction_recovered'?'recovered_timestamp':'legacy_estimated',inherited,parent_thread_id:s.parent_thread_id,fork_ordinal_exclusive:s.fork_ordinal_exclusive,fingerprint:null,ordinal:e.ordinal??null,api_equivalent_usd:null,credit_equivalent:null,allowance_weight:null,api_rule_id:null,credit_rule_id:null,allowance_rule_id:null};
+  return {...t,origin_thread_id:s.thread_id,id:identity,response_id:payload.response_id??null,session_id:payload.session_id??s.session_id,thread_id:owner,turn_id:turn,root_turn_id:payload.root_turn_id??s.root_turn_id,timestamp:stamp!,model:payload.model??c.model,model_source:payload.model?'response':c.model_source,reasoning_effort:payload.reasoning_effort??c.reasoning_effort,service_tier:payload.service_tier??c.service_tier,project:c.project,uncached_input_tokens:Math.max(t.input_tokens-t.cached_input_tokens-t.cache_write_input_tokens,0),source,attribution_quality:payload.model?'explicit':c.model==='unknown'?'unknown':owner===s.thread_id?'context':'inherited',data_quality:inconsistent?'inconsistent':source==='token_usage_record'?'provider_reported':source==='compaction_recovered'?'recovered_timestamp':'legacy_estimated',inherited,parent_thread_id:s.parent_thread_id,fork_ordinal_exclusive:s.fork_ordinal_exclusive,fingerprint:null,ordinal:e.ordinal??null,api_equivalent_usd:null,credit_equivalent:null,allowance_weight:null,api_rule_id:null,credit_rule_id:null,allowance_rule_id:null};
  }
  if(typ==='token_usage_record'){
   const t=tokens(p.usage);if(!t||!p.response_id){issue('invalid_usage_record');return out;}
   const r=make(t,p,'token_usage_record','response:'+p.response_id);out.usage.push(r);
-  if(r.thread_id===s.thread_id){s.has_exact=true;if(r.turn_id&&!s.exact_turns.includes(r.turn_id))s.exact_turns.push(r.turn_id);out.exactTurn={thread:r.thread_id,turn:r.turn_id??''};}
+  if(s.unknown_previous&&unknownPair(s.unknown_previous,r))out.exactLink={legacy:s.unknown_previous.id,response:r.id};
+  s.unknown_previous=out.exactLink?null:r;
+  if(r.thread_id===s.thread_id){s.has_exact=true;if(r.turn_id&&!s.exact_turns.includes(r.turn_id))s.exact_turns.push(r.turn_id);if(r.turn_id)out.exactTurn={thread:r.thread_id,turn:r.turn_id};}
   return out;
  }
  if(typ==='compacted'){
@@ -75,9 +78,10 @@ export function parseLine(line:string,s:ParseState):ParseOutput {
  }else delta=last;
  if(!delta||delta.total_tokens===0)return out;
  s.legacy_index++;
- if(s.turn_id?s.exact_turns.includes(s.turn_id):s.has_exact)return out;
  const fp=hash([current,last]);const id='legacy:'+hash([s.thread_id,s.turn_id,stamp,current,last]);
  const r=make(delta,{},'legacy_token_count',id);r.fingerprint=fp;out.usage.push(r);
+ if(s.unknown_previous&&unknownPair(s.unknown_previous,r))out.exactLink={legacy:r.id,response:s.unknown_previous.id};
+ s.unknown_previous=out.exactLink?null:r;
  if(!prev&&current&&last&&current.total_tokens>last.total_tokens)issue('legacy_initial_baseline_gap');
  return out;
 }

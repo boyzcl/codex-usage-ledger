@@ -67,7 +67,7 @@ NO_COLOR=1 cux status
 
 `*` 表示只覆盖已观测时段。表格下方列出观测起止时间：Token 列包含全天或截至当前的全部已入账记录，反推容量只使用首末快照之间匹配的 Token。不会把全天 Token 除以半天的额度变化，也不会补造午夜快照。
 
-账号和额度窗口归属尚未核实，默认容量保持 `—`。经验值不会覆盖严格估算的缺失原因。需要查看实验结果时，显式使用 `cux report --from 2026-10-01 --to 2026-10-03 --experimental-empirical` 或 `cux estimate --experimental-empirical`；输出同时说明严格估算不可用的原因。此前展示的经验值不属于已验证套餐容量。
+账号和额度窗口归属尚未核实，默认容量保持 `—`。经验值不会覆盖严格估算的缺失原因。需要查看实验结果时，显式使用 `cux report --from 2026-10-01 --to 2026-10-03 --experimental-empirical` 或 `cux estimate --experimental-empirical`；输出同时说明严格估算不可用的原因。默认 JSON 和 JSONL 同样标记 `unverified`、来源、严格原因及限制，容量值保持 `null`。实验输出标记 `experimental_unverified`，此前展示的经验值不属于已验证套餐容量。
 
 实验示例：匹配时段内用了 4 亿 Token，额度增加 20 个百分点，经验外推为 `4 亿 × 100 ÷ 20 = 20 亿 Token`。它假设模型、速度、输入输出及缓存组合保持相似，且没有其他设备等未记录消耗，**不是官方套餐的固定 Token 上限**。两个模型的 Token 数相同，也不意味着额度消耗相同。
 
@@ -120,7 +120,7 @@ API 等效金额不是订阅实际付款。`null` 或 `unknown` 表示证据不�
 
 ## 3. 获取原始事实明细
 
-`export` 导出 JSONL：每行一个 JSON 对象。第一行是文件说明，之后每行一条记录。它适合后续用 Python、数据库或助手重新计算；直接导入 Excel 前通常需要先转换。
+`export` 导出 JSONL：每行一个 JSON 对象。第一行是文件说明，当前 `schema_version: 2`，之后每行一条记录。它适合后续用 Python、数据库或助手重新计算；直接导入 Excel 前通常需要先转换。
 
 先创建一个导出文件夹：
 
@@ -147,6 +147,8 @@ cux export observations --from 2026-10-01 --to 2026-10-03 --out "$HOME/Downloads
 cux export account --out "$HOME/Downloads/codex-ledger/account.jsonl"
 cux export prices --out "$HOME/Downloads/codex-ledger/prices.jsonl"
 cux export estimates --out "$HOME/Downloads/codex-ledger/estimates.jsonl"
+cux export conflicts --out "$HOME/Downloads/codex-ledger/conflicts.jsonl"
+cux export estimate-history --out "$HOME/Downloads/codex-ledger/estimate-history.jsonl"
 cux export issues --out "$HOME/Downloads/codex-ledger/issues.jsonl"
 ```
 
@@ -159,7 +161,9 @@ cux export issues --out "$HOME/Downloads/codex-ledger/issues.jsonl"
 | `account` | 官方账户累计量与按日 buckets 的历次快照；用于核对账本，不是逐请求明细 |
 | `observations` | 监控启用后的查询原始响应、请求开始及观测时间、错误代码、本地同步摘要、监控中断记录；用于检查采集完整性 |
 | `prices` | 所有已保存的价格规则、来源和有效期；不受日期参数过滤 |
-| `estimates` | 每个周期最近一次保存的严格权重容量估计及其依据，不含查询时计算的经验外推；实验经验结果请用 `cux estimate --experimental-empirical --json` 或显式实验报表 JSON 保存 |
+| `estimates` | 每个周期最近一次派生结果的未核实视图，容量/区间为 `null`，含 `status: unverified`、来源、严格原因及限制；实验入口仍须显式开启 |
+| `estimate-history` | 替换或失效前仍存在的派生原值，标记 `historical_unverified`；用于审计，不作为已核实容量 |
+| `conflicts` | 同 ID 的争议变体、六项 Token、归因与历史价格引用，含 `dispute_status`；历史证据行 `confirmed: false`、`quantity: null`，不相加为用量。`open` 尚未计入确认；`resolved_by_owner` 的选定 owner 已恢复确认 |
 | `issues` | 导入质量问题代码、文件哈希及偏移；不受日期参数过滤 |
 
 `usage` 中的原始事实指从日志提取的计数字段，不是完整会话日志；不会导出提问、回复或工具输出，也省略项目路径。会话与响应 ID 会保留，便于去重。旧格式记录可能是累计计数差分，需结合 `source` 和 `data_quality` 判断，不能全部视为逐响应官方原始记录。

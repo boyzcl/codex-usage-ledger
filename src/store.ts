@@ -1,6 +1,8 @@
 import {DatabaseSync} from './sqlite.js';
 import {tokenFields,type Usage,type Quota,type PriceRule,type ParseState} from './types.js';
 import {hash} from './quota.js';
+import {sameFacts,sameContext,authorityUpgrade,contextKeys,usageDecision,type UsageIntent} from './usage-policy.js';
+import {priceUsage} from './pricing.js';
 export class Ledger {
  db:DatabaseSync;
  constructor(path:string){
@@ -9,6 +11,7 @@ export class Ledger {
    CREATE INDEX IF NOT EXISTS usage_time ON usage_records(timestamp);
    CREATE INDEX IF NOT EXISTS usage_totals ON usage_records(total_tokens);
    CREATE INDEX IF NOT EXISTS usage_thread_turn ON usage_records(thread_id,turn_id);
+   CREATE INDEX IF NOT EXISTS usage_exact_scope ON usage_records(thread_id,turn_id) WHERE source='token_usage_record';
    CREATE TABLE IF NOT EXISTS quota_snapshots(id TEXT PRIMARY KEY,timestamp TEXT,limit_id TEXT,slot TEXT,window_duration_mins INTEGER,resets_at INTEGER,used_percent REAL,source TEXT,raw_json TEXT);
    CREATE INDEX IF NOT EXISTS quota_cycle ON quota_snapshots(limit_id,window_duration_mins,resets_at,timestamp);
    CREATE INDEX IF NOT EXISTS quota_latest ON quota_snapshots(limit_id,slot,timestamp DESC);
@@ -27,6 +30,11 @@ export class Ledger {
    CREATE TABLE IF NOT EXISTS legacy_candidate_history(id TEXT PRIMARY KEY,raw_json TEXT NOT NULL,disposition TEXT NOT NULL);
    CREATE INDEX IF NOT EXISTS legacy_candidate_identity ON legacy_candidates(json_extract(raw_json,'$.id'));
    CREATE INDEX IF NOT EXISTS legacy_candidate_parent ON legacy_candidates(parent_thread_id);
+   CREATE TABLE IF NOT EXISTS exact_legacy_links(legacy_id TEXT,response_id TEXT,PRIMARY KEY(legacy_id,response_id));
+   CREATE INDEX IF NOT EXISTS exact_link_response ON exact_legacy_links(response_id,legacy_id);
+   CREATE TABLE IF NOT EXISTS usage_conflicts(id TEXT,variant TEXT,reason TEXT,timestamp TEXT,raw_json TEXT NOT NULL,PRIMARY KEY(id,variant));
+   CREATE TABLE IF NOT EXISTS usage_conflict_state(id TEXT PRIMARY KEY,status TEXT NOT NULL,reason TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS capacity_estimate_history(id TEXT PRIMARY KEY,cycle_id TEXT,created_at TEXT,status TEXT,raw_json TEXT NOT NULL);
    CREATE TABLE IF NOT EXISTS repair_evidence(id TEXT PRIMARY KEY,version INTEGER,status TEXT NOT NULL,raw_json TEXT NOT NULL);
 
   `);
@@ -42,24 +50,68 @@ export class Ledger {
  observe(source:string,kind:string,status:string,raw:unknown,timestamp=new Date().toISOString()){
   this.db.prepare('INSERT INTO observations(timestamp,source,kind,status,raw_json) VALUES (?,?,?,?,?)').run(timestamp,source,kind,status,JSON.stringify(raw));
  }
- markExact(thread:string,turn:string){this.db.prepare('INSERT OR IGNORE INTO exact_turns VALUES (?,?)').run(thread,turn);this.db.prepare("DELETE FROM usage_records WHERE thread_id=? AND COALESCE(turn_id,'')=? AND source='legacy_token_count'").run(thread,turn);}
- insertUsage(row:Usage,correct=false):boolean{
-  if(row.source==='legacy_token_count'&&this.db.prepare('SELECT 1 FROM exact_turns WHERE thread_id=? AND turn_id=?').get(row.thread_id,row.turn_id??''))return false;
-  const old=this.db.prepare('SELECT raw_json FROM usage_records WHERE id=?').get(row.id);
-  if(old){const prior=JSON.parse(old.raw_json as string) as Usage;
-   const quality=(x:Usage)=>(x.source==='token_usage_record'?4:0)+(x.inherited?0:2)+(x.model==='unknown'?0:1);
-   if(correct&&prior.source==='token_usage_record'&&row.source!=='token_usage_record')return false;
-   if(correct&&tokenFields.some(k=>row[k]!==prior[k]))throw Error('usage_token_fact_conflict');
-   if(!correct&&quality(row)<=quality(prior))return false;
-   if(JSON.stringify(row)===JSON.stringify(prior))return false;
+ markExact(thread:string,turn:string){if(turn)this.db.prepare('INSERT OR IGNORE INTO exact_turns VALUES (?,?)').run(thread,turn);}
+ linkExact(legacy:string,response:string){this.db.prepare('INSERT OR IGNORE INTO exact_legacy_links VALUES (?,?)').run(legacy,response);}
+ superseded(row:Usage):boolean{
+  if(row.source!=='legacy_token_count')return false;
+  if(row.turn_id)return !!this.db.prepare("SELECT 1 FROM usage_records WHERE source='token_usage_record' AND thread_id=? AND turn_id=? LIMIT 1").get(row.thread_id,row.turn_id);
+  return !!this.db.prepare("SELECT 1 FROM exact_legacy_links l JOIN usage_records u ON u.id=l.response_id WHERE l.legacy_id=? AND u.source='token_usage_record' AND u.thread_id=? AND NOT EXISTS (SELECT 1 FROM exact_legacy_links other JOIN legacy_candidates c ON json_extract(c.raw_json,'$.id')=+other.legacy_id WHERE other.response_id=l.response_id AND other.legacy_id<>l.legacy_id) LIMIT 1").get(row.id,row.thread_id);
+ }
+ conflicted(id:string){return this.db.prepare('SELECT status FROM usage_conflict_state WHERE id=?').get(id)?.status==='open';}
+ recordVariants(rows:Usage[],reason:string){
+  for(const row of rows)this.db.prepare('INSERT OR IGNORE INTO usage_conflicts VALUES (?,?,?,?,?)').run(row.id,hash([row.id,...tokenFields.map(k=>row[k]),...contextKeys.map(k=>row[k]),row.api_rule_id,row.credit_rule_id,row.allowance_rule_id,row.api_equivalent_usd,row.credit_equivalent,row.allowance_weight]),reason,row.timestamp,JSON.stringify(row));
+ }
+ quarantine(rows:Usage[],reason?:string){
+  for(const id of new Set(rows.map(r=>r.id))){
+   const prior=this.db.prepare('SELECT reason FROM usage_conflict_state WHERE id=?').get(id);
+   const group=rows.filter(r=>r.id===id),known=this.db.prepare('SELECT raw_json FROM usage_conflicts WHERE id=?').all(id).map(v=>JSON.parse(v.raw_json as string) as Usage);
+   const facts=[...known,...group],numeric=facts.some(v=>!sameFacts(facts[0],v));
+   const selected=numeric||prior?.reason==='token_fact_conflict'?'token_fact_conflict':reason??prior?.reason as string??'attribution_conflict';
+   this.recordVariants(group,selected);
+   this.db.prepare('INSERT OR REPLACE INTO usage_conflict_state VALUES (?,?,?)').run(id,'open',selected);
+   this.db.prepare("DELETE FROM legacy_events WHERE (thread_id,event_index) IN (SELECT thread_id,event_index FROM legacy_candidates WHERE json_extract(raw_json,'$.id')=?)").run(id);
+   this.db.prepare("DELETE FROM legacy_candidates WHERE json_extract(raw_json,'$.id')=?").run(id);
+   this.db.prepare('DELETE FROM usage_records WHERE id=?').run(id);
   }
-  this.db.prepare('INSERT OR REPLACE INTO usage_records VALUES (?,?,?,?,?,?,?,?,?,?)').run(row.id,row.response_id,row.thread_id,row.session_id,row.turn_id,row.timestamp,row.model,row.source,row.total_tokens,JSON.stringify(row));return !old;
+ }
+ insertUsage(row:Usage,intent:UsageIntent='append'):boolean{
+  if(this.conflicted(row.id)){
+   const state=this.db.prepare('SELECT reason FROM usage_conflict_state WHERE id=?').get(row.id)!;
+   const variants=this.db.prepare('SELECT raw_json FROM usage_conflicts WHERE id=?').all(row.id).map(v=>JSON.parse(v.raw_json as string) as Usage);
+   if(state.reason==='token_fact_conflict'||variants.some(v=>!sameFacts(v,row))){this.quarantine([row],'token_fact_conflict');return false;}
+   // Only a strictly more reliable original can adjudicate copied attribution evidence.
+   const owner=!row.inherited&&row.source==='token_usage_record'&&(row.origin_thread_id??row.thread_id)===row.thread_id;
+   if(!owner||!variants.every(v=>usageDecision(v,row,'append')==='replace'||sameContext(v,row))){this.quarantine([row],'attribution_conflict');return false;}
+   this.recordVariants([row],'attribution_conflict');this.db.prepare('UPDATE usage_conflict_state SET status=? WHERE id=?').run('resolved_by_owner',row.id);
+  }
+  const saved=this.db.prepare('SELECT raw_json FROM usage_records WHERE id=?').get(row.id);
+  const prior=saved?JSON.parse(saved.raw_json as string) as Usage:null;
+  if(prior){
+   const decision=usageDecision(prior,row,intent);
+   if(decision==='conflict'){this.quarantine([prior,row],sameFacts(prior,row)?'attribution_conflict':'token_fact_conflict');return false;}
+   if(!sameContext(prior,row)&&((!prior.inherited&&row.inherited)||(prior.inherited&&!row.inherited)||prior.source!==row.source)){
+    this.recordVariants([prior,row],'attribution_conflict');this.db.prepare('INSERT OR REPLACE INTO usage_conflict_state VALUES (?,?,?)').run(row.id,'resolved_by_owner','attribution_conflict');
+   }
+   if(decision==='keep'&&intent!=='retain'){
+    if(intent==='repair'||intent==='reparse')row={...prior,repair_status:undefined,origin_source:prior.origin_source??row.origin_source,origin_thread_id:prior.origin_thread_id??row.origin_thread_id};
+    else return false;
+   }else if(intent!=='retain'&&!authorityUpgrade(prior,row)){
+    const pinned=new Set([prior.api_rule_id,prior.credit_rule_id,prior.allowance_rule_id].filter(Boolean));
+    if(row.model===prior.model&&row.service_tier===prior.service_tier)row={...row,api_equivalent_usd:prior.api_equivalent_usd,credit_equivalent:prior.credit_equivalent,allowance_weight:prior.allowance_weight,api_rule_id:prior.api_rule_id,credit_rule_id:prior.credit_rule_id,allowance_rule_id:prior.allowance_rule_id};
+    else row=priceUsage(row,this.rules().filter(r=>pinned.has(r.id)));
+   }
+  }
+  if(prior&&JSON.stringify(row)===JSON.stringify(prior))return false;
+  if(this.superseded(row))return false;
+  this.db.prepare('INSERT OR REPLACE INTO usage_records VALUES (?,?,?,?,?,?,?,?,?,?)').run(row.id,row.response_id,row.thread_id,row.session_id,row.turn_id,row.timestamp,row.model,row.source,row.total_tokens,JSON.stringify(row));
+  if(row.source==='token_usage_record'&&row.turn_id)this.markExact(row.thread_id,row.turn_id);
+  return !saved;
  }
  insertQuota(q:Quota){this.db.prepare('INSERT OR IGNORE INTO quota_snapshots VALUES (?,?,?,?,?,?,?,?,?)').run(q.id,q.timestamp,q.limit_id,q.slot,q.window_duration_mins,q.resets_at,q.used_percent,q.source,q.raw_json);}
  insertAccount(timestamp:string,raw:unknown){this.db.prepare('INSERT OR REPLACE INTO account_usage_snapshots VALUES (?,?,?)').run(hash([timestamp,raw]),timestamp,JSON.stringify(raw));}
  issue(path:string,offset:number,code:string,timestamp:string|null){this.db.prepare('INSERT OR IGNORE INTO ingest_issues VALUES (?,?,?,?,?)').run(hash([path,offset,code]),hash(path),offset,code,timestamp);}
  checkpoint(path:string):any{return this.db.prepare('SELECT * FROM ingest_files WHERE path=?').get(path);}
- saveCheckpoint(path:string,stat:{dev:number;ino:number;size:number;mtimeMs:number;ctimeMs:number},offset:number,state:ParseState,prefixHash:string){this.db.prepare('INSERT OR REPLACE INTO ingest_files(path,device,inode,size,mtime,offset,state_json,updated_at,prefix_hash,parser_version,ctime) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(path,String(stat.dev),String(stat.ino),stat.size,stat.mtimeMs,offset,JSON.stringify(state),new Date().toISOString(),prefixHash,2,stat.ctimeMs);}
+ saveCheckpoint(path:string,stat:{dev:number;ino:number;size:number;mtimeMs:number;ctimeMs:number},offset:number,state:ParseState,prefixHash:string){this.db.prepare('INSERT OR REPLACE INTO ingest_files(path,device,inode,size,mtime,offset,state_json,updated_at,prefix_hash,parser_version,ctime) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(path,String(stat.dev),String(stat.ino),stat.size,stat.mtimeMs,offset,JSON.stringify(state),new Date().toISOString(),prefixHash,3,stat.ctimeMs);}
  beginLegacyReplay(thread:string){
   // A rewritten sequence must not splice new counters into the old sequence.
   // Preserve removed pending facts outside the active chain; existing history stays visible and marked.
@@ -67,19 +119,20 @@ export class Ledger {
    const row=JSON.parse(c.raw_json as string) as Usage;
    this.db.prepare('INSERT OR REPLACE INTO legacy_candidate_history VALUES (?,?,?)').run(row.id,c.raw_json,'source_unavailable');
    const old=this.db.prepare('SELECT raw_json FROM usage_records WHERE id=?').get(row.id);
-   if(old)this.insertUsage({...JSON.parse(old.raw_json as string),repair_status:'source_unavailable'},true);
+   if(old)this.insertUsage({...JSON.parse(old.raw_json as string),repair_status:'source_unavailable'},'retain');
   }
   this.db.prepare('DELETE FROM legacy_candidates WHERE thread_id=?').run(thread);
   this.db.prepare('DELETE FROM legacy_events WHERE thread_id=?').run(thread);
  }
  saveLegacy(row:Usage,index:number){
-  const old=this.db.prepare('SELECT raw_json FROM legacy_candidate_history WHERE id=?').get(row.id);
-  if(old&&tokenFields.some(k=>row[k]!==JSON.parse(old.raw_json as string)[k]))throw Error('usage_token_fact_conflict');
+  const stored=this.db.prepare('SELECT raw_json FROM legacy_candidate_history WHERE id=?').get(row.id)??this.db.prepare('SELECT raw_json FROM usage_records WHERE id=?').get(row.id)??this.db.prepare("SELECT raw_json FROM legacy_candidates WHERE json_extract(raw_json,'$.id')=? LIMIT 1").get(row.id);
+  if(this.conflicted(row.id)){this.quarantine([row]);return;}
+  if(stored){const old=JSON.parse(stored.raw_json as string) as Usage;if(!sameFacts(old,row)){this.quarantine([old,row]);return;}}
   this.db.prepare('DELETE FROM legacy_candidate_history WHERE id=?').run(row.id);
   this.db.prepare('INSERT OR REPLACE INTO legacy_events VALUES (?,?,?)').run(row.thread_id,index,row.fingerprint);
   this.db.prepare('INSERT OR REPLACE INTO legacy_candidates VALUES (?,?,?,?,?,?)').run(row.thread_id,index,row.parent_thread_id,row.fingerprint,JSON.stringify(row),'pending');
  }
- reconcileLegacy(threads?:string[]){
+ reconcileLegacy(threads?:string[],intent:UsageIntent='append'){
   const affected=new Set(threads);
   if(threads){const queue=[...threads];for(let i=0;i<queue.length;i++)for(const c of this.db.prepare('SELECT DISTINCT thread_id FROM legacy_candidates WHERE parent_thread_id=?').all(queue[i]))if(!affected.has(c.thread_id as string)){affected.add(c.thread_id as string);queue.push(c.thread_id as string);}}
   const candidates=threads?[...affected].flatMap(id=>this.db.prepare('SELECT * FROM legacy_candidates WHERE thread_id=? ORDER BY event_index').all(id)):this.db.prepare('SELECT * FROM legacy_candidates ORDER BY thread_id,event_index').all();
@@ -90,20 +143,23 @@ export class Ledger {
    let diverged=false,unanchored=false,next:number|null=null;
    const boundary=(JSON.parse(chain[0].raw_json as string) as Usage).fork_ordinal_exclusive;
    const parent=(chain[0].parent_thread_id?this.db.prepare('SELECT event_index,fingerprint,raw_json FROM legacy_candidates WHERE thread_id=? ORDER BY event_index').all(chain[0].parent_thread_id):[]).filter(p=>{if(boundary==null)return true;const ordinal=(JSON.parse(p.raw_json as string) as Usage).ordinal;return ordinal!==null&&ordinal<boundary;});
+   const parentByIndex=new Map(parent.map(p=>[Number(p.event_index),p]));const parentByFingerprint=new Map<string,typeof parent[number]>();
+   for(const p of parent)if(!parentByFingerprint.has(p.fingerprint as string))parentByFingerprint.set(p.fingerprint as string,p);
    for(const c of chain){const row=JSON.parse(c.raw_json as string) as Usage;let disposition='confirmed';
-    if(this.db.prepare('SELECT 1 FROM exact_turns WHERE thread_id=? AND turn_id=?').get(row.thread_id,row.turn_id??''))disposition='superseded';
-    else if(row.inherited)disposition='replayed';
-    else if(c.parent_thread_id&&!diverged){
+    if(this.conflicted(row.id))continue;
+    if(c.parent_thread_id&&!diverged){
      if(!parent.length||unanchored)disposition='pending';
      else {
-      const match:Record<string,unknown>|undefined=next===null?parent.find(p=>p.fingerprint===c.fingerprint):parent.find(p=>Number(p.event_index)===next&&p.fingerprint===c.fingerprint);
-      if(match){next=Number(match.event_index)+1;disposition='replayed';}
+      const match:Record<string,unknown>|undefined=next===null?parentByFingerprint.get(c.fingerprint as string):parentByIndex.get(next);
+      if(match&&match.fingerprint===c.fingerprint){next=Number(match.event_index)+1;disposition='replayed';}
       else if(next===null){unanchored=true;disposition='pending';}
       else diverged=true; // Only a contiguous replay prefix is excluded. Later equality is real usage.
      }
     }
+    if(row.inherited)disposition='replayed';
+    if(this.superseded(row))disposition='superseded';
     this.db.prepare('UPDATE legacy_candidates SET disposition=? WHERE thread_id=? AND event_index=?').run(disposition,c.thread_id,c.event_index);
-    if(disposition==='confirmed'){if(this.insertUsage(row,true))added++;}
+    if(disposition==='confirmed'){if(this.insertUsage(row,intent))added++;}
     else {this.db.prepare("DELETE FROM usage_records WHERE id=? AND source='legacy_token_count'").run(row.id);}
    }
   }
@@ -111,7 +167,11 @@ export class Ledger {
  }
  legacySummary(){
   const summary=this.db.prepare("SELECT disposition,COUNT(*) AS count,COALESCE(SUM(json_extract(raw_json,'$.total_tokens')),0) AS tokens FROM legacy_candidates GROUP BY disposition").all();
-  this.set('legacy_reconciliation',{version:1,pending_tokens:summary.find(s=>s.disposition==='pending')?.tokens??0,replayed_tokens:summary.find(s=>s.disposition==='replayed')?.tokens??0,confirmed_events:summary.find(s=>s.disposition==='confirmed')?.count??0,source_unavailable_candidate_tokens:this.db.prepare("SELECT COALESCE(SUM(json_extract(h.raw_json,'$.total_tokens')),0) AS total FROM legacy_candidate_history h WHERE NOT EXISTS (SELECT 1 FROM usage_records u WHERE u.id=h.id) AND NOT EXISTS (SELECT 1 FROM legacy_candidates c WHERE json_extract(c.raw_json,'$.id')=h.id)").get()!.total});
+  this.set('legacy_reconciliation',{version:2,conflict_records:this.db.prepare("SELECT COUNT(*) n FROM usage_conflict_state WHERE status='open'").get()!.n,resolved_attribution_records:this.db.prepare("SELECT COUNT(*) n FROM usage_conflict_state WHERE status='resolved_by_owner'").get()!.n,pending_tokens:summary.find(s=>s.disposition==='pending')?.tokens??0,replayed_tokens:summary.find(s=>s.disposition==='replayed')?.tokens??0,confirmed_events:summary.find(s=>s.disposition==='confirmed')?.count??0,source_unavailable_candidate_tokens:this.db.prepare("SELECT COALESCE(SUM(json_extract(h.raw_json,'$.total_tokens')),0) AS total FROM legacy_candidate_history h WHERE NOT EXISTS (SELECT 1 FROM usage_conflicts x WHERE x.id=h.id) AND NOT EXISTS (SELECT 1 FROM usage_records u WHERE u.id=h.id) AND h.id NOT IN (SELECT json_extract(raw_json,'$.id') FROM legacy_candidates)").get()!.total});
+ }
+ preserveEstimates(status:string){
+  for(const r of this.db.prepare('SELECT * FROM capacity_estimates').all())this.db.prepare('INSERT OR IGNORE INTO capacity_estimate_history VALUES (?,?,?,?,?)').run(hash([r.id,r.created_at,r.raw_json]),r.id,r.created_at,status,r.raw_json);
+  const latest=this.get<unknown[]>('latest_estimates');if(latest?.length)this.db.prepare('INSERT OR IGNORE INTO capacity_estimate_history VALUES (?,?,?,?,?)').run(hash(['latest_estimates',latest]),'latest_estimates',new Date().toISOString(),status,JSON.stringify(latest));
  }
  records(from='0000',to='9999'):Usage[]{return this.db.prepare('SELECT raw_json FROM usage_records WHERE timestamp>=? AND timestamp<? ORDER BY timestamp').all(from,to).map(x=>JSON.parse(x.raw_json as string));}
  officialQuotas(from='0000',to='9999'):Quota[]{return this.db.prepare("SELECT * FROM quota_snapshots WHERE source='app_server' AND timestamp>=? AND timestamp<? ORDER BY timestamp").all(from,to) as unknown as Quota[];}
