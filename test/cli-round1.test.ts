@@ -21,3 +21,8 @@ test('R1 actual CLI hides empirical defaults and preserves strict reasons in exp
  const example=run([...args,'--experimental-empirical']);assert.equal(example.plan_cycles[0].estimated_tokens,1000);assert.equal(example.plan_cycles[0].strict_reason,'unverified_account_window_attribution');
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('CLI help exposes the conflict and preserved-estimate audit exports',()=>{
+ const help=execFileSync(process.execPath,[new URL('../src/cli.js',import.meta.url).pathname,'--help'],{encoding:'utf8'});
+ assert.match(help,/conflicts/);assert.match(help,/estimate-history/);
+});

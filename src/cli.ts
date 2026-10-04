@@ -16,7 +16,7 @@ import {format,formatError} from './display.js';
 import {runMonitor} from './monitor.js';
 import {service} from './service.js';
 import {repairPreview,consistentBackup} from './repair.js';
-import {exportData} from './export.js';
+import {exportData,exportKinds} from './export.js';
 function argumentsForCli(){return parseArgs({allowPositionals:true,options:{json:{type:'boolean'},'experimental-empirical':{type:'boolean'},details:{type:'boolean'},out:{type:'string'},input:{type:'string'},'out-dir':{type:'string'},timezone:{type:'string'},from:{type:'string'},to:{type:'string'},'data-home':{type:'string'},'codex-home':{type:'string'},offline:{type:'boolean'},once:{type:'boolean'},online:{type:'boolean'},help:{type:'boolean'}}});}
 let opts:ReturnType<typeof argumentsForCli>;
 try{opts=argumentsForCli();}catch{console.error(process.argv.includes('--json')?JSON.stringify({error:'invalid_arguments'}):formatError('invalid_arguments'));process.exit(1);}
@@ -45,7 +45,7 @@ const help=`Codex 用量账本
 
 数据导出
   cux export usage --from 日期 --to 日期 --out 文件.jsonl
-  支持 usage / quota / account / observations / prices / estimates / issues
+  支持 ${exportKinds.join(' / ')}
   不写 --out 则输出 JSONL；已有文件不会被覆盖。
 
 显示与路径
