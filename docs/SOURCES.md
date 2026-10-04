@@ -41,3 +41,7 @@
 2026-10-04 核验内置 CLI `0.160.0`，并读取对应 tag [`rust-v0.160.0` 的 protocol.rs](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/protocol/src/protocol.rs)（Git blob `abc4e90847636bfe51e6275ede528a13616c8573`）。`ThreadSettingsAppliedEvent.thread_settings` 是 `ThreadSettingsSnapshot`；`service_tier` 和 `reasoning_effort` 的 `Option` 字段以 `skip_serializing_if = "Option::is_none"` 序列化。省略表示此完整快照没有该设置，不能保留上次 Fast/high，也不能补成 Standard。`ThreadSettingsOverrides` / `TurnSettingsUpdate` 则明确为局部更新；模型 reroute 沿用局部字段语义。本轮不据最新主干字段推断旧版本的官方可用状态。
 
 同一 tag 的 `SessionMeta.forked_from_ordinal_exclusive` 注释明确说明它是逻辑父线程的继承 exclusive ordinal，与物理 `history_base` 独立；revert 可替换物理历史而保留此边界。本轮仅投影该边界字段，不投影相邻的账号或用户标识，用于排除父线程分叉之后的偶然相等计数。
+
+## 修复运行时边界
+
+官方 Node [`v22.16.0` sqlite.md](https://github.com/nodejs/node/blob/v22.16.0/doc/api/sqlite.md) 将 `sqlite.backup` 标为 `added: v22.16.0`（blob `2c66898bf376c0f09dab60da5622b960f10462a3`）；[`v22.13.0` 的同文件](https://github.com/nodejs/node/blob/v22.13.0/doc/api/sqlite.md) 不含该 API（blob `270b8e8d8b750725942d655d6ba0dfbe9018623f`）。项目保持普通查询/导入的 22.13 下限，修复入口单独检查能力，避免导入模块时让普通命令一并失效。

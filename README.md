@@ -1,12 +1,12 @@
 # codex-usage-ledger
 
-本地优先的 Codex Token 与额度账本。运行环境为 Node.js 22.13+；SQLite 使用 Node.js 内置模块。当前 macOS 版本支持受只读保护的官方额度采集；其他平台可以离线导入 rollout，尚未验证在线采集。
+本地优先的 Codex Token 与额度账本。普通查询与导入支持 Node.js 22.13+；SQLite 使用 Node.js 内置模块。账本修复另需 `node:sqlite.backup`（Node.js 22 系列至少为 22.16.0），缺少该 API 时会在创建输出前明确拒绝修复。当前 macOS 版本支持受只读保护的官方额度采集；其他平台可以离线导入 rollout，尚未验证在线采集。
 
 ## 快速开始
 
 默认命令现为中文终端看板：剩余额度与重置时间优先，Token 使用「万、亿」，金额始终标注覆盖率。加 `--details` 展开精确数字与完整信息；`--json` 保留既有汇总字段并增加逐日字段，JSONL 导出保持原格式。颜色只在支持的终端中启用，设置 `NO_COLOR=1` 可关闭。
 
-需要 Node.js 22.13+、Git，以及已登录的官方 Codex 环境。首次从 GitHub 获取项目：
+需要 Node.js 22.13+、Git，以及已登录的官方 Codex 环境；使用修复/回滚功能时，Node.js 22 系列至少需 22.16.0。首次从 GitHub 获取项目：
 
 ```sh
 git clone https://github.com/boyzcl/codex-usage-ledger.git

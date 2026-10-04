@@ -1,6 +1,6 @@
 import {mkdirSync,existsSync,chmodSync,writeFileSync,realpathSync,openSync,closeSync} from 'node:fs';
 import {resolve,join,relative,dirname,basename} from 'node:path';
-import {DatabaseSync,backup} from './sqlite.js';
+import {DatabaseSync,backup,requireBackupSupport} from './sqlite.js';
 import {Ledger} from './store.js';
 import {syncRollouts} from './ingest.js';
 import {tokenFields,type Usage} from './types.js';
@@ -10,6 +10,7 @@ import {localDay} from './report.js';
 export const repairVersion=1;
 // SQLite's online backup includes committed WAL frames. The input is opened read-only.
 export async function consistentBackup(input:string,output:string){
+ requireBackupSupport();
  if(existsSync(output))throw Error('repair_output_exists');
  const source=new DatabaseSync(resolve(input),{readOnly:true});
  try{
@@ -21,6 +22,7 @@ const sameFacts=(a:Usage,b:Usage)=>tokenFields.every(k=>a[k]===b[k]);
 const contextKeys=['thread_id','session_id','turn_id','root_turn_id','timestamp','model','model_source','service_tier','reasoning_effort','project','source','inherited','attribution_quality','data_quality'] as const;
 const sameContext=(a:Usage,b:Usage)=>contextKeys.every(k=>a[k]===b[k]);
 export async function repairPreview(input:string,codexHome:string,outDir:string,timezone='UTC',progress?:(files:number,total:number)=>void){
+ requireBackupSupport();
  const canonical=(p:string):string=>existsSync(p)?realpathSync(p):join(canonical(dirname(p)),basename(p));
  input=realpathSync(input);codexHome=realpathSync(codexHome);outDir=canonical(resolve(outDir));
  new Intl.DateTimeFormat('en',{timeZone:timezone});

@@ -16,3 +16,5 @@ export const DatabaseSync=sqlite.DatabaseSync;
 export type DatabaseSync=import('node:sqlite').DatabaseSync;
 
 export const backup=sqlite.backup;
+
+export function requireBackupSupport(){if(typeof backup!=='function')throw Error('sqlite_backup_unavailable');}
