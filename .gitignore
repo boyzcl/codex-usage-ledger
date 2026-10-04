@@ -1,0 +1,20 @@
+node_modules/
+dist/
+*.db*
+*.sqlite*
+work/
+.DS_Store
+
+# Local credentials, runtime data and personal exports
+.env
+.env.*
+auth.json
+*.pem
+*.key
+*.log
+*.jsonl
+*.zip
+outputs/
+.codex-usage-ledger/
+# Machine-specific acceptance reports remain local
+docs/VERIFICATION*.md

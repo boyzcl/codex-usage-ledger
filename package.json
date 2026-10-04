@@ -1,0 +1,27 @@
+{
+  "name": "codex-usage-ledger",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-only, auditable Codex token and quota ledger",
+  "bin": {
+    "cux": "bin/cux.mjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "lint": "eslint src test",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "start": "node bin/cux.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3",
+    "eslint": "^9.36.0",
+    "typescript-eslint": "^8.44.0"
+  }
+}

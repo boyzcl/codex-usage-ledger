@@ -1,0 +1,6 @@
+{
+  "hooks": {
+    "Stop": [{"hooks":[{"type":"command","command":"python3 \"${PLUGIN_ROOT}/hooks/refresh.py\"","timeout":3}]}],
+    "SessionEnd": [{"hooks":[{"type":"command","command":"python3 \"${PLUGIN_ROOT}/hooks/refresh.py\"","timeout":3}]}]
+  }
+}

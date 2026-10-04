@@ -1,0 +1,7 @@
+{
+  "$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name":"codex-usage-ledger",
+  "version":"0.1.0",
+  "description":"Refresh the local Codex token ledger when a turn or session ends.",
+  "extensions":{"com.openai":{"hooks":"./hooks/hooks.json"}}
+}
