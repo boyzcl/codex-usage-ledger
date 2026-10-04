@@ -4,7 +4,7 @@ import {capacityView} from './capacity-policy.js';
 import {parseArgs} from 'node:util';
 import {homedir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {chmodSync,existsSync} from 'node:fs';
+import {chmodSync,existsSync,readFileSync} from 'node:fs';
 import {loadConfig} from './config.js';
 import {Ledger} from './store.js';
 import {syncRollouts} from './ingest.js';
@@ -13,13 +13,14 @@ import {quotaEstimates} from './estimator.js';
 import {aggregate,period,report,localDay,shiftDay,midnight} from './report.js';
 import {hash} from './quota.js';
 import {dailyReport,empiricalPlans,cycleKey} from './daily.js';
-import {priceUsage} from './pricing.js';
+import {priceUsage,validatePrices,catalogueId} from './pricing.js';
+import {revalue} from './valuation.js';
 import {format,formatError} from './display.js';
 import {runMonitor} from './monitor.js';
 import {service} from './service.js';
 import {repairPreview,consistentBackup} from './repair.js';
 import {exportData,exportKinds} from './export.js';
-function argumentsForCli(){return parseArgs({allowPositionals:true,options:{json:{type:'boolean'},'experimental-empirical':{type:'boolean'},details:{type:'boolean'},out:{type:'string'},input:{type:'string'},'out-dir':{type:'string'},timezone:{type:'string'},from:{type:'string'},to:{type:'string'},'data-home':{type:'string'},'codex-home':{type:'string'},offline:{type:'boolean'},once:{type:'boolean'},online:{type:'boolean'},help:{type:'boolean'}}});}
+function argumentsForCli(){return parseArgs({allowPositionals:true,options:{json:{type:'boolean'},'experimental-empirical':{type:'boolean'},details:{type:'boolean'},out:{type:'string'},input:{type:'string'},'out-dir':{type:'string'},timezone:{type:'string'},from:{type:'string'},to:{type:'string'},basis:{type:'string'},at:{type:'string'},run:{type:'string'},'data-home':{type:'string'},'codex-home':{type:'string'},offline:{type:'boolean'},once:{type:'boolean'},online:{type:'boolean'},help:{type:'boolean'}}});}
 let opts:ReturnType<typeof argumentsForCli>;
 try{opts=argumentsForCli();}catch{console.error(process.argv.includes('--json')?JSON.stringify({error:'invalid_arguments'}):formatError('invalid_arguments'));process.exit(1);}
 const command=opts.positionals[0]??'status';
@@ -50,6 +51,13 @@ const help=`Codex 用量账本
   支持 ${exportKinds.join(' / ')}
   不写 --out 则输出 JSONL；已有文件不会被覆盖。
 
+价格与重算
+  cux prices                         查看不可变价格目录及哈希
+  cux prices import --input 更新.json 原子追加新规则；调价需新 ID 和 supersedes
+  cux revalue --basis event           按事件时间另存回算版本，可加 --from/--to
+  cux revalue --basis current --at ISO 按指定时刻另存假设重估，不改旧金额
+  cux export valuations --run ID      导出指定重算结果；valuation-runs 导出目录来源
+
 显示与路径
   --experimental-empirical           显式显示实验经验外推，仍保留严格缺失原因
   --details                          展开精确数字和完整详情
@@ -67,7 +75,7 @@ async function main(){
   if(!opts.values['codex-home']||!opts.values['out-dir'])throw Error('repair_requires_explicit_paths');
   const value=await repairPreview(opts.values.input,opts.values['codex-home'],opts.values['out-dir'],opts.values.timezone??'UTC',(n,total)=>{if(process.stderr.isTTY)console.error(`修复预览：${n}/${total}`);});console.log(JSON.stringify(value,null,2));return;
  }
- if(!['status','today','week','month','report','models','quota','estimate','sync','watch','doctor','service','export'].includes(command))throw Error('unknown_command');
+ if(!['status','today','week','month','report','models','quota','estimate','sync','watch','doctor','service','export','prices','revalue'].includes(command))throw Error('unknown_command');
  const home=resolve(opts.values['data-home']??process.env.CUX_HOME??join(homedir(),'.codex-usage-ledger'));
  const {config,rules}=loadConfig(home,opts.values['codex-home']);
  const view={command,details:opts.values.details,timezone:config.timezone,width:process.stdout.columns??80,color:!!process.stdout.isTTY&&process.env.NO_COLOR===undefined&&process.env.TERM!=='dumb'};
@@ -102,11 +110,20 @@ async function main(){
   current=undefined;asOf=new Date().toISOString();estimates();return {rollout,account};
  }
  try{
+  if(command==='prices'){
+   const action=opts.positionals[1]??'list';
+   if(action==='import'){if(!opts.values.input)throw Error('prices_require_input');show(db.savePrices(validatePrices(JSON.parse(readFileSync(opts.values.input,'utf8')))));}
+   else if(action==='list')show({catalogue_id:catalogueId(db.rules()),rules:db.rules()});else throw Error('unknown_prices_action');return;
+  }
+  if(command==='revalue'){
+   const basis=opts.values.basis??'event';if(basis!=='event'&&basis!=='current')throw Error('invalid_valuation_basis');
+   show(revalue(db,period('report',config.timezone,opts.values.from,opts.values.to),basis,opts.values.at));return;
+  }
   if(command==='sync'){show(await sync());return;}
   if(command==='watch'){
    await runMonitor(db,client,config,home,{offline:opts.values.offline,once:opts.values.once,show,estimates:()=>{current=undefined;asOf=new Date().toISOString();return estimates();}});return;
   }
-  if(command==='export'){const result=await exportData(db,opts.positionals[1]??'usage',period('report',config.timezone,opts.values.from,opts.values.to),opts.values.out);if(opts.values.out)show(result);return;}
+  if(command==='export'){const result=await exportData(db,opts.positionals[1]??'usage',period('report',config.timezone,opts.values.from,opts.values.to),opts.values.out,opts.values.run);if(opts.values.out)show(result);return;}
   if(command==='estimate'){show(withEmpirical(estimates()));return;}
   if(command==='quota'){show({as_of:asOf,official_availability:db.get('official_availability'),account:db.get('account'),windows:quotaView(db,asOf),collection:db.get('collection:account/rateLimits/read'),monitor:db.get('monitor_state')});return;}
   if(command==='doctor'){

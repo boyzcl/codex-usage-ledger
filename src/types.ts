@@ -27,6 +27,7 @@ export interface ParseState extends Context {
 export interface ParseOutput {usage:Usage[]; quotas:Quota[]; issues:{code:string; timestamp:string|null}[]; exactLink?:{legacy:string;response:string};exactTurn?:{thread:string;turn:string};}
 export type Rates={input:number;cached_input:number;cache_write:number|null;output:number};
 export interface PriceRule {
+ supersedes?:string;
  id:string; kind:'api'|'credit'|'allowance'; model:string; processing_mode:string;
  effective_from:string; effective_to:string|null; context_min:number;context_max:number|null;
  rates:Rates;source_url:string;retrieved_at:string;basis:string;

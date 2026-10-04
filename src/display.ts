@@ -14,6 +14,7 @@ Object.assign(reasons,{invalid_historical_window_attribution:'历史记录不在
 const issues:Record<string,[string,string]>={
  inconsistent_token_components:['Token 拆分不一致','保留总量；不对不一致的拆分计价。'],inherited_legacy_skipped:['已排除继承记录','去重处理，不代表新增数据丢失。'],legacy_initial_baseline_gap:['旧记录起始基线缺口','首次记录之前的消耗可能无法恢复。'],unrecoverable_usage_gap:['无法恢复的历史用量','现有日志不足，不能凭空补齐。'],unresolved_fork_history:['分叉历史无法确认','无法确认的继承部分未重复计入。'],malformed_line:['日志行格式损坏','该行未入账；其他完整记录继续处理。'],oversized_line_skipped:['日志行超过读取上限','该行已跳过，保留偏移用于排查。'],missing_timestamp:['记录缺少时间','无法按日期归属的记录需要核对。'],invalid_usage_record:['用量字段无效','该记录未作为有效用量入账。']};
 export const errorMessages:Record<string,string>={
+ immutable_price_rule_changed:'旧价格 ID 的事实不可改写；请用新 ID 和 supersedes 导入调价规则。',invalid_price_supersession:'替代关系无效：须引用已保存的同类规则、使用更晚起点，且旧规则只能有一个直接后继。',invalid_price_rule:'价格规则字段或有效期无效，请核对输入文件。',invalid_price_rate:'价格必须是非负数；未知缓存写入价格用 null。',invalid_prices:'价格输入必须是规则数组。',prices_require_input:'请用 --input 指定新价格规则数组文件。',unknown_prices_action:'价格操作不存在，请使用 prices 或 prices import。',invalid_valuation_basis:'重算口径仅支持 --basis event 或 current。',valuation_requires_at:'指定时刻重估需要 --at ISO 时间。',event_valuation_has_no_at:'事件时间回算不接受 --at；请去掉该参数。',export_run_requires_valuation:'--run 仅用于 valuations 或 valuation-runs 导出。',
  repair_quota_context_conflict:'同一额度事实的身份/可用状态投影冲突，修复已回滚；原始证据保留。',
  repair_quota_fact_conflict:'同一 ID 的额度事实冲突，修复事务已回滚。原始输入和基线备份保留，请核对副本；本次未切换生产账本。',
  sqlite_backup_unavailable:'账本修复需要 node:sqlite.backup（Node.js 22 系列至少为 22.16.0）。请升级运行时；本次未创建输出。',
@@ -250,7 +251,13 @@ export function format(value:any,options:DisplayOptions={}):string {
   add();add(value.running?'暂停：cux service stop':value.installed?'恢复：cux service start':'启用：cux service install',2);
  }else if(command==='sync')syncResult(value);
  else if(command==='export'){title('导出完成');pair('记录数',exact(value.records));pair('格式','JSONL（每行一条 JSON）');add('已保存至：');add(value.path??'标准输出');if(value.range)add(`事件范围：${stamp(value.range.from)} 至 ${stamp(value.range.to_exclusive)}（不含结束时刻）`,2);add('这是静态快照，后台新增记录不会自动写入此文件。',2);}
- else if(command==='watch'){
+ else if(command==='prices'){
+  title('价格目录');pair('目录哈希',value.catalogue_id);pair('规则数',Array.isArray(value.rules)?value.rules.length:value.rules);if(value.added!==undefined)pair('新增规则',value.added);
+  add('旧规则保留；显式后继从生效起点替代同类规则。');add('导出完整规则：cux export prices；调价方法见使用指南。',2);
+ }else if(command==='revalue'){
+  title('金额重算版本');pair('版本 ID',value.run_id);pair('价格目录',value.catalogue_id);pair('计价口径',value.basis==='event_time'?'源事件时间回算':'指定时刻假设重估');if(value.valuation_at)pair('计价时刻',stamp(value.valuation_at));pair('记录数',value.records);pair('API 已知小计',money(value.known_api_subtotal_usd));pair('Token 计价覆盖率',percent(value.api_token_coverage));pair('本次执行',value.reused?'复用相同输入的已有版本':'保存新版本');
+  add('原 Token、归属、入账金额和价格引用保留。重算结果不是订阅账单或官方容量。',2);add('导出结果：cux export valuations --run '+value.run_id,2);
+ }else if(command==='watch'){
   const names:Record<string,string>={started:'监控已启动',stopped:'监控已停止',local_sync:'本地入账',remote_sync:'官方采集',observation_gap:'观测中断',watcher:'文件监听',estimate:'容量计算'};
   const state=value.status==='ok'?'成功':value.status==='unknown'?'需留意':'异常';
   const info=value.kind==='local_sync'&&value.status==='ok'?`新增 ${exact(value.data?.added_records)} 条 · ${exact(value.data?.changed_files)} 个变化文件`:value.kind==='remote_sync'?Object.entries(value.data?.methods??{}).map(([m,s])=>methodName(m)+(s==='ok'?'成功':'失败')).join(' · '):value.kind==='observation_gap'?'已记录空档；缺失的历史额度无法补造':value.data?.code?errorMessages[value.data.code]??'请运行 cux doctor --details 检查':'';

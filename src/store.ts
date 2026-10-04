@@ -3,7 +3,7 @@ import {tokenFields,type Usage,type Quota,type PriceRule,type ParseState} from '
 import {hash,normalizeQuota,legacyQuotaId} from './quota.js';
 import {quotaContext,quotaCycleKey,scopeKey,redactIdentity,officialSnapshot,recoveredContext,mergeContexts,contextFingerprint,type QuotaContext} from './quota-policy.js';
 import {sameFacts,sameContext,authorityUpgrade,contextKeys,usageDecision,type UsageIntent} from './usage-policy.js';
-import {priceUsage} from './pricing.js';
+import {priceUsage,validatePrices,validateCatalogue,canonicalJson,catalogueId} from './pricing.js';
 export class Ledger {
  db:DatabaseSync;
  constructor(path:string){
@@ -20,6 +20,9 @@ export class Ledger {
    CREATE TABLE IF NOT EXISTS account_usage_snapshots(id TEXT PRIMARY KEY,timestamp TEXT,raw_json TEXT);
    CREATE TABLE IF NOT EXISTS ingest_files(path TEXT PRIMARY KEY,device TEXT,inode TEXT,size INTEGER,mtime REAL,offset INTEGER,state_json TEXT,updated_at TEXT);
    CREATE TABLE IF NOT EXISTS pricing_rules(id TEXT PRIMARY KEY,raw_json TEXT);
+   CREATE TABLE IF NOT EXISTS valuation_runs(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,raw_json TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS valuation_results(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,usage_id TEXT NOT NULL,timestamp TEXT NOT NULL,raw_json TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS valuation_result_run ON valuation_results(run_id);
    CREATE TABLE IF NOT EXISTS capacity_estimates(id TEXT PRIMARY KEY,created_at TEXT,raw_json TEXT);
    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
    CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY AUTOINCREMENT,timestamp TEXT NOT NULL,source TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,raw_json TEXT NOT NULL);
@@ -220,7 +223,16 @@ export class Ledger {
  cycleQuotas(cycles:Quota[]):Quota[]{return cycles.flatMap(q=>(this.db.prepare('SELECT * FROM quota_snapshots WHERE source=? AND limit_id=? AND slot=? AND window_duration_mins=? AND resets_at=? ORDER BY timestamp').all(q.source,q.limit_id,q.slot,q.window_duration_mins,q.resets_at) as unknown as Quota[]).map(r=>this.quotaProjection(r)).filter(r=>quotaCycleKey(r)===quotaCycleKey(q)));}
 
  latestAccount():any{const r=this.db.prepare('SELECT timestamp,raw_json FROM account_usage_snapshots ORDER BY timestamp DESC LIMIT 1').get();return r?{timestamp:r.timestamp,...JSON.parse(r.raw_json as string)}:null;}
- savePrices(rules:PriceRule[]){for(const r of rules){const old=this.db.prepare('SELECT raw_json FROM pricing_rules WHERE id=?').get(r.id);if(old&&old.raw_json!==JSON.stringify(r))throw Error('immutable_price_rule_changed');this.db.prepare('INSERT OR IGNORE INTO pricing_rules VALUES (?,?)').run(r.id,JSON.stringify(r));}}
+ savePrices(rules:PriceRule[]){
+  validatePrices(rules);this.db.exec('SAVEPOINT price_import');try{
+   // Read and validate the same SQLite snapshot that receives the append.
+   const existing=this.rules(),combined=new Map(existing.map(r=>[r.id,r]));
+   for(const rule of rules){const old=combined.get(rule.id);if(old&&canonicalJson(old)!==canonicalJson(rule))throw Error('immutable_price_rule_changed');combined.set(rule.id,rule);}
+   const catalogue=validateCatalogue([...combined.values()]);let added=0;
+   for(const r of rules)added+=Number(this.db.prepare('INSERT OR IGNORE INTO pricing_rules VALUES (?,?)').run(r.id,JSON.stringify(r)).changes);
+   this.db.exec('RELEASE price_import');return {added,rules:catalogue.length,catalogue_id:catalogueId(catalogue)};
+  }catch(e){this.db.exec('ROLLBACK TO price_import; RELEASE price_import');throw e;}
+ }
  rules():PriceRule[]{return this.db.prepare('SELECT raw_json FROM pricing_rules').all().map(x=>JSON.parse(x.raw_json as string));}
  issues(){return this.db.prepare('SELECT code,COUNT(*) AS count FROM ingest_issues GROUP BY code').all();}
 }

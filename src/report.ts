@@ -1,5 +1,5 @@
 import {tokenFields,type Usage,type PriceRule,type TokenField} from './types.js';
-import {priceUsage} from './pricing.js';
+import {createPricer,catalogueId} from './pricing.js';
 export function aggregate(rows:Usage[]){
  const total=Object.fromEntries([...tokenFields,'uncached_input_tokens'].map(k=>[k,0])) as Record<TokenField|'uncached_input_tokens',number>;
  let api=0,credit=0,apiCount=0,creditCount=0,apiTokens=0,creditTokens=0;const sources:Record<string,number>={};
@@ -8,8 +8,8 @@ export function aggregate(rows:Usage[]){
 }
 export function report(rows:Usage[],rules:PriceRule[],at=new Date().toISOString()){
  const models:Record<string,ReturnType<typeof aggregate>>={};for(const model of [...new Set(rows.map(r=>r.model))].sort())models[model]=aggregate(rows.filter(r=>r.model===model));
- const repriced=rows.map(r=>priceUsage({...r,timestamp:at},rules));
- return {totals:aggregate(rows),models,current_price_valuation:{at,description:'Hypothetical revaluation at current observed prices, not historical charges or subscription expenditure',...aggregate(repriced)}};
+ const price=createPricer(rules),repriced=rows.map(r=>price({...r,timestamp:at}));
+ return {totals:aggregate(rows),models,current_price_valuation:{at,basis:'current_at',catalogue_id:catalogueId(rules),description:'Hypothetical revaluation at current observed prices, not historical charges or subscription expenditure',...aggregate(repriced)}};
 }
 export function localDay(iso:string,timeZone:string):string{return new Intl.DateTimeFormat('en-CA',{timeZone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(iso));}
 export function shiftDay(day:string,n:number){const d=new Date(day+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}

@@ -52,9 +52,9 @@ cux doctor --online
 
 默认数据目录：`~/.codex-usage-ledger/`。可以用 `CUX_HOME` 或 `--data-home` 修改。包含：
 
-- `usage.db`：记录、额度快照、账户摘要、增量检查点、价格版本、估计和质量问题。
+- `usage.db`：记录、额度快照、账户摘要、增量检查点、完整价格目录、重算版本、估计和质量问题。
 - `config.json`：源目录、时区、`monitor` 分层采集频率、Codex 程序路径、估计配置。旧 `poll_seconds` 不再控制 watch。
-- `prices.json`：人工审阅的、有来源和生效时间的价格规则。
+- `prices.json`：首次启动及兼容加载的价格种子；后续调价追加到数据库，完整目录用 `cux export prices` 导出。
 - `app-server/`：隔离的 Codex app-server 运行状态。
 - `logs/`：监控摘要日志与启动错误；监控摘要约 5 MB 轮转一次。官方 quota / usage 响应保存在 SQLite observations，认证与会话正文不入库。
 
@@ -89,12 +89,14 @@ macOS 在线采集使用独立 `CODEX_HOME` 和 `sandbox-exec`。认证交给官
 
 `credit_equivalent` 使用 Codex 已购 credits 的官方费率。cache write 按普通非缓存 input 计入，不额外收 API 的 cache-write 加价。Fast 的 purchased-credit 倍率与 included-allowance 倍率分别处理。
 
-价格规则包含模型、速度、上下文区间、起止时间、四项费率、来源及核验时间。规则 ID 入库后不可改写。增加新价格必须使用新 ID 和不重叠的有效区间。未知模型、未知速度、无法确认的价格时期以及规则重叠均返回 `null`。
+价格规则包含模型、速度、上下文区间、起止时间、四项费率、来源及核验时间。规则 ID 入库后不可改写。唯一推荐调价入口为 `cux prices import --input update.json`：使用新 ID，以 `supersedes` 指向同 kind、模型、档位、上下文区间的当前末端规则。后继从生效起点替代旧规则，旧 raw、截止时间和入账引用均保留；起点包含、终点不含。每个旧规则只能有一个直接后继，继续调价须替代该后继。未声明关系的重叠仍为 `null`，不按最新价格任意选择。API、credits、allowance 各自演进，四类 Token 费率分别保存。未知模型、速度、价格时期或所需缓存写入费率保持未知。
 
 首版价格表只证明 2026-10-03 核验时的价格，不追溯编造历史生效日。报告同时输出：
 
-1. 按已验证历史有效期计算的金额，缺价时总额为 `unknown`，同时提供已知小计和覆盖率。
+1. 保留入账时计算的金额与原价格引用，缺价时总额为 `unknown`，同时提供已知小计和覆盖率。
 2. 按当前价格重估的假设金额，单独标注时间和覆盖率。
+
+`cux revalue --basis event --from 2026-10-01 --to 2026-10-03` 按当前保存的目录和源事件时间另存回算。`cux revalue --basis current --at 2026-10-04T10:00:00Z --from 2026-10-01 --to 2026-10-03` 另存指定时刻的假设重估。两者均不覆盖源 Token、归属或入账金额；相同输入复用版本 ID，失败整批回滚。完整调价与导出步骤见 [使用指南](docs/USAGE.md)。
 
 ## 额度容量
 
@@ -147,7 +149,8 @@ src/
   parser.ts       模型状态、usage 和旧格式回退
   ingest.ts       增量导入
   store.ts        SQLite 账本
-  pricing.ts     版本化金额计算
+  pricing.ts     不可变目录、显式替代与金额计算
+  valuation.ts   事件时间回算、指定时刻重估及一致输入快照
   quota.ts       额度窗口规范化
   estimator.ts   容量估计与等效 mix
   report.ts      时间区间和汇总
@@ -155,7 +158,7 @@ src/
   display.ts     终端输出
   monitor.ts     分层调度、单实例锁、运行观测
   service.ts     macOS launchd 服务管理
-  export.ts      JSONL 原始事实导出
+  export.ts      JSONL 事实、价格及重算版本导出
   cli.ts         命令入口
 bin/cux.mjs
 plugin/
@@ -187,3 +190,7 @@ cux doctor --online --json
 ## v0.4.4
 
 额度快照增加账号范围、官方普通用量许可与支出控制投影；旧原始事实保留，冲突恢复不选择身份。账号/工作区/计费来源或窗口对应证据不足时，默认与显式实验都不拼接容量样本。最近7/30天本地历史独立于当前周期读取，并披露实际观测范围。JSONL schema_version升级为3；字段与使用边界见 [使用指南](docs/USAGE.md)。
+
+## v0.4.5
+
+新增显式价格后继、原子目录导入及可追溯的金额回算版本。旧规则和入账引用保留，未声明重叠仍未知；回算与指定时刻假设重估分别保存，附算法、目录及输入哈希。JSONL schema_version 仍为3，新增 `valuations` 和 `valuation-runs`。打开数据库只增建两个重算表，不要求重扫日志或重做历史修复。升级与安全回退见 [部署与恢复](docs/DEPLOYMENT.md)。

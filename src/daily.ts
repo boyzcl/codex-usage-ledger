@@ -2,7 +2,7 @@ import {quotaCycleKey,quotaContext,attributedTo,allocationReason} from './quota-
 import {capacityView} from './capacity-policy.js';
 import type {Quota,Usage,PriceRule} from './types.js';
 import {aggregate,report,localDay,midnight,shiftDay} from './report.js';
-import {priceUsage} from './pricing.js';
+import {createPricer} from './pricing.js';
 export interface Range {from:string;to_exclusive:string;timezone:string;}
 export const cycleKey=quotaCycleKey;
 export interface Empirical {
@@ -88,7 +88,7 @@ export function combinePlans(plans:Empirical[]):Empirical[]{
  });
 }
 export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:Range,at=new Date().toISOString(),options:{experimentalEmpirical?:boolean}={}){
- const base=report(rows,rules,at),priced=rows.map(r=>priceUsage({...r,timestamp:at},rules)).map((r,i)=>({...r,timestamp:rows[i].timestamp}));
+ const base=report(rows,rules,at),price=createPricer(rules),priced=rows.map(r=>price({...r,timestamp:at})).map((r,i)=>({...r,timestamp:rows[i].timestamp}));
  const rowGroups=new Map<string,Usage[]>(),priceGroups=new Map<string,Usage[]>();
  // Reuse the formatter: a large historical report must not build one Intl formatter per record.
  const dayFormat=new Intl.DateTimeFormat('en-CA',{timeZone:range.timezone,year:'numeric',month:'2-digit',day:'2-digit'});

@@ -20,6 +20,8 @@
 
 `--to 2026-10-03` 包含 10 月 3 日全天。日、周、月统计按`config.json` 中的时区划分（示例为 `Asia/Shanghai`）；导出的事件时间为 UTC，末尾的 `Z` 表示 UTC。精确时间戳作为 `--to` 时不包含该时刻。
 
+例如 `cux report --from 2026-10-03T00:00:00Z --to 2026-10-04T00:00:00Z` 查询这两个 UTC 时刻之间的记录。`week` 是当地周一至今，`month` 是月初至今；`status` 的逐日表覆盖今天及前6个日历日。`status.workload` 与 `estimate --details` 的最近7天/30天则从报告时刻向前滚动7×24/30×24小时，另有当前额度周期的本地历史。这些范围可能重叠，不能相加；周期内活动不自动成为该窗口的已归属消耗。
+
 查询已有数据不会调用模型。普通报告与 `quota` 读取本地账本；如需立即刷新一次，可运行 `cux sync`。可先用 `cux service status` 检查服务；自动监控已运行时，通常无需手动同步。
 
 所有查询默认显示中文看板。`cux status` 依次显示剩余额度、今日用量、API 等效价值和采集状态；数字默认使用「万、亿」，时间使用配置时区，首次运行默认采用系统时区。
@@ -165,6 +167,8 @@ cux export issues --out "$HOME/Downloads/codex-ledger/issues.jsonl"
 | `estimate-history` | 替换或失效前仍存在的派生原值，标记 `historical_unverified`；用于审计，不作为已核实容量 |
 | `conflicts` | 同 ID 的争议变体、六项 Token、归因与历史价格引用，含 `dispute_status`；历史证据行 `confirmed: false`、`quantity: null`，不相加为用量。`open` 尚未计入确认；`resolved_by_owner` 的选定 owner 已恢复确认 |
 | `issues` | 导入质量问题代码、文件哈希及偏移；不受日期参数过滤 |
+| `valuations` | 后续回算的逐条事实投影、输入指纹、原入账报价/引用和新报价/引用；日期按源事件时间过滤，可用 `--run` 指定版本 |
+| `valuation-runs` | 重算版本、算法、完整价格目录及来源、输入哈希、口径、范围与覆盖率；日期按版本创建时间过滤，可用 `--run` 指定版本 |
 
 `usage` 中的原始事实指从日志提取的计数字段，不是完整会话日志；不会导出提问、回复或工具输出，也省略项目路径。会话与响应 ID 会保留，便于去重。旧格式记录可能是累计计数差分，需结合 `source` 和 `data_quality` 判断，不能全部视为逐响应官方原始记录。
 
@@ -186,14 +190,14 @@ with path.open() as file:
 print(total)
 ```
 
-若目标是重算金额，请使用 `usage` 和 `prices`；若目标是研究额度容量，请同时使用 `usage`、`quota` 和 `observations`。保留 `account` 可以做账户总量交叉核对。不要仅凭百分比与混合模型 Token 总和直接相除，并声称得到了官方套餐总容量。
+若目标是重算金额，可用第8节的 `revalue` 并同时导出 `valuations` 和 `valuation-runs`，或自行结合 `usage` 和 `prices`；若目标是研究额度容量，请同时使用 `usage`、`quota` 和 `observations`。保留 `account` 可以做账户总量交叉核对。不要仅凭百分比与混合模型 Token 总和直接相除，并声称得到了官方套餐总容量。
 
 ## 4. 自动监控的实际行为
 
 | 项目 | 默认行为 |
 | --- | --- |
-| 本地日志变化 | 合并约 1.5 秒内的通知，只读取变化文件的新增部分 |
-| 补漏 | 每 5 分钟重新发现文件并核对检查点，不全量重读未变文件 |
+| 本地日志变化 | 合并约 1.5 秒内的通知，校验已消费前缀摘要，再解析变化文件的新增完整行 |
+| 补漏 | 每 5 分钟重新发现文件并核对检查点，不反复解析或入账未变日志；摘要校验仍可能读取大量字节 |
 | 官方额度 | 最近 10 分钟检测到本地日志活动时，每 5 分钟查询；空闲时每 15 分钟查询 |
 | 官方账户汇总 | 每 30 分钟查询 |
 | 重置边界 | 已知重置前约 1 分钟、重置后安排额外采样；合并相近查询 |
@@ -271,7 +275,8 @@ tail -n 20 "$HOME/.codex-usage-ledger/logs/service-error.log"
 
 - 主数据库：`~/.codex-usage-ledger/usage.db`
 - 配置：`~/.codex-usage-ledger/config.json`
-- 价格：`~/.codex-usage-ledger/prices.json`
+- 价格种子：`~/.codex-usage-ledger/prices.json`；完整目录在数据库 `pricing_rules` 表
+- 保存的回算：数据库 `valuation_runs` 和 `valuation_results` 表
 - 运行日志：`~/.codex-usage-ledger/logs/`
 - 启动项：`~/Library/LaunchAgents/local.codex-usage-ledger.<数据目录标识>.plist`
 - 程序目录：克隆并构建本仓库的目录
@@ -289,6 +294,8 @@ sqlite3 "$HOME/.codex-usage-ledger/usage.db" ".backup '$HOME/Downloads/codex-led
 ```
 
 备份文件名应使用新名称。数据库备份含本地归因信息，适合自己保存；导出的 Token 明细则省略了项目路径。
+
+另存 `config.json`、原 `prices.json`、程序提交及 Node 版本；只备份种子不能恢复后来导入的目录或回算历史。恢复时先 `cux service stop`，确认所有写入者退出；保留当前数据库及 WAL/SHM 的失败现场和最新增量。把一致备份复制到一个新的数据目录，放入对应配置与价格种子，先以 `cux --data-home /absolute/path/restored prices --json` 和 `report --json` 核对。程序与数据库匹配并验收后，按 [部署与恢复](DEPLOYMENT.md) 切换默认目录，再 `cux service start`。不要覆盖打开的数据库或把旧 WAL 留给恢复文件；较早备份不能覆盖后来新增的记录、价格或回算。
 
 ## 7. 长期能得到什么
 
@@ -313,3 +320,104 @@ sqlite3 "$HOME/.codex-usage-ledger/usage.db" ".backup '$HOME/Downloads/codex-led
 容量拟合要求当前周期的精确归属。历史等效组合另按同一已验证账号、工作区、计费来源、额度桶、窗口位置和长度筛选，可使用有来源事件证明的历史周期，不要求历史重置时间等于当前重置时间。近7天、30天及模型30日组合分别换算；历史缺归属、权重或价格时，相应等效值为空，`equivalent_reasons` 给出原因。当前容量可用不意味着历史组合完整；这些组合仍只描述已观察记录。
 
 日报保留每天、模型和已验证周期十列表，模型额度分配与容量未知时用「—」；整体说明保留严格原因。未知身份快照按日期和已观察的桶标签展示为观测摘要，不把每份快照称为套餐周期，不拼接百分比或推算容量；JSON 中仍保留各份独立证据。JSONL新增scope/availability/证据引用和范围口径，schema_version为3。私人原响应及旧金额/价格引用留在SQLite，导出隐去原账号、工作区、用户ID和email，仅输出归一化哈希引用。
+
+## 8. 更新价格与保存重算版本（v0.4.5）
+
+金额有三层：`usage` 保存源 Token/归属及入账时报价；`revalue --basis event` 用后来保存的目录按原事件时刻回算；`--basis current --at` 把同批 Token 假设放到指定时刻计价。普通日报的当前价格重估是查询时生成的临时结果，需保存可复现版本时使用 `revalue`。任何回算都不改源事实、归属、入账报价或原规则 ID，也不提高账号/窗口归属的可信度。
+
+### 唯一推荐调价流程
+
+先查看完整目录和哈希，导出价格事实：
+
+```sh
+mkdir -p "$HOME/Downloads/codex-ledger"
+cux prices --json
+cux export prices --out "$HOME/Downloads/codex-ledger/prices-before-update.jsonl"
+```
+
+核实官方来源、生效时刻及四项费率后，在终端执行下面的交互脚本，从导出选择旧规则并生成新规则数组。脚本不推断官方调价、不改种子；此前有后继时拒绝选旧节点。输入 UTC 或带时区偏移的 ISO 时间；无证据的历史日期不能补造。缓存写入价格不明可输入 `null`，其他费率须有证据，单位均为每百万 Token。
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+console = open("/dev/tty")
+def ask(prompt):
+    print(prompt, end="", flush=True)
+    return console.readline().strip()
+folder = Path.home() / "Downloads/codex-ledger"
+rules = [json.loads(line)["data"] for line in
+         (folder / "prices-before-update.jsonl").read_text().splitlines()
+         if json.loads(line)["type"] == "prices"]
+old_id = ask("要替代的当前末端规则 ID: ")
+old = next(r for r in rules if r["id"] == old_id)
+assert not any(r.get("supersedes") == old_id for r in rules), "请选择当前末端规则"
+new = dict(old)
+new["id"] = ask("新规则 ID（不可复用）: ")
+assert new["id"] not in {r["id"] for r in rules}, "新 ID 已存在"
+new["supersedes"] = old_id
+new["effective_from"] = ask("已核实生效时刻（ISO）: ")
+new["effective_to"] = ask("明确截止时刻（ISO，未公布留空）: ") or None
+new["retrieved_at"] = ask("来源核验时刻（ISO）: ")
+new["source_url"] = ask("官方来源 HTTPS URL: ")
+new["basis"] = ask("已核实事实及限制说明: ")
+new["rates"] = {}
+for field in ("input", "cached_input", "cache_write", "output"):
+    value = ask(f"{field} 每百万 Token 费率: ")
+    new["rates"][field] = None if field == "cache_write" and value == "null" else float(value)
+out = folder / "price-update.json"
+with out.open("x") as file:
+    json.dump([new], file, ensure_ascii=False, indent=2)
+print(out)
+PY
+```
+
+核对生成文件后导入并查看目录：
+
+```sh
+cux prices import --input "$HOME/Downloads/codex-ledger/price-update.json"
+cux prices --json
+```
+
+输入必须是 JSON 规则数组，不能把 JSONL 直接导入。多规则调价可放入同一数组，整批校验及追加原子完成。完全相同的重导入新增0条；旧 ID 的任何事实变化都会拒绝。价格种子不变，后台后续同步和重启读取数据库完整目录，无需修改 `prices.json`。
+
+新旧规则的 kind、model、processing_mode、context_min/context_max 必须相同，新起点严格晚于旧起点。有效区间为 `[effective_from, effective_to)`；旧规则实际终点取原明确截止与后继起点的较早者，原字段不改。原明确截止早于后继起点时保留缺价空档。每个旧节点只允许一个直接后继，继续调价须替代最新末端。模型、档位、上下文分段改变时应分别提供有证据的规则，不能借替代关系跨维度套价。
+
+API、已购 credits、已验证 allowance 独立演进。普通输入、缓存读取、缓存写入、输出分别计价，reasoning 已含在 output。已购 credits 的缓存写入按其普通 input 费率，不能把 API 的写入加价或 credits 倍率当作套餐内 allowance 权重。没有已验证 allowance 仍未知，不靠价格更新产生容量。
+
+未声明替代关系的重叠不会按「最新」选择，报价为 `null`。未知模型/速度、拆分不一致、无法核实的历史价格或正量缓存写入缺价，也保持未知。第一个公开种子只证明2026-10-03核验时的价格，回算不会自动补齐更早时期。
+
+### 保存与导出重算版本
+
+按事件时间回算指定区间：
+
+```sh
+cux revalue --basis event --from 2026-10-03 --to 2026-10-04
+```
+
+把同批事件假设放到指定时刻，使用该时刻适用的目录价格：
+
+```sh
+cux revalue --basis current --at 2026-10-04T10:00:00Z \
+  --from 2026-10-03 --to 2026-10-04
+```
+
+省略 `--basis` 默认为 event；event 不接受 `--at`，current 必须提供 `--at`。省略日期处理全部已确认历史。命令输出版本 ID、目录哈希、口径、记录数、已知小计和 Token 覆盖率；`--json` 还输出三种金额、范围、输入哈希及完整目录。相同输入、目录、范围及口径复用同一版本；后来新增事实、合法归因修复或新价格目录会产生新版本，旧版本保留。
+
+复制输出的版本 ID，替换下面的占位值。结果与来源需成对导出：
+
+```sh
+valuation_run='替换为命令输出的版本ID'
+cux export valuations --run "$valuation_run" \
+  --out "$HOME/Downloads/codex-ledger/valuation-results.jsonl"
+cux export valuation-runs --run "$valuation_run" \
+  --out "$HOME/Downloads/codex-ledger/valuation-run.jsonl"
+```
+
+`valuation-runs` 保存完整目录、来源、算法版本 `valuation_v1`、内容哈希和输入范围；`valuations` 保存必要 Token/模型/速度事实、逐条输入指纹以及原/新报价引用。事件源的规范化事实和原归属仍留在 `usage` 中；如需独立重算或核对来源，另导出相同范围的 `usage`。指纹覆盖执行当时的完整规范化 Usage，包括入账报价；之后修复产生的输入不能冒充旧快照。项目路径和会话正文不复制到重算导出，原账号/工作区标识继续隐去；响应 ID 及哈希仍可能关联个人活动，分享前应审阅。
+
+新导出类型沿用 JSONL schema_version 3。`valuations` 的日期过滤按事件时间，`valuation-runs` 按版本创建时间；成对导出时建议只用 `--run`，避免同一历史日期筛掉后来创建的 run。`prices` 导出所有规则，不按日期过滤。已有输出文件不覆盖，换新名称可保存多个版本。
+
+回算在单个写事务内固定目录和源输入，两遍流式读取后原子提交 run/results；中断或失败没有半批结果。大范围回算期间其他入账可能因写锁超时而暂缓，优先按有限日期区间执行。需要全历史时，先一致备份，再 `service stop`、回算、`service start`；记录停服区间，本地日志可补读，停止期间的官方额度采样不能事后恢复。数据库忙时先确认其他操作结束，再重试相同命令。
+
+已知小计仅涵盖可计价 Token；覆盖率不代表账本覆盖全部账户活动。回算和当前价格重估都不是订阅账单，credits 不证明套餐内容量。账号、窗口或权重未验证时容量继续显示 `—`。待核对事实不是零，也不能统称为已经去重的重复记录。
