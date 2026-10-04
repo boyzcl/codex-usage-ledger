@@ -29,7 +29,7 @@ export class AppServer {
    const m=JSON.parse(line);const p=this.pending.get(m.id);if(!p)return;clearTimeout(p.timer);this.pending.delete(m.id);
    if(m.error)p.reject(Error('rpc_error_'+String(m.error.code)));else p.resolve(m.result);
   }catch{/* Malformed or unrelated notifications never enter the ledger. */}});
-  try{await this.request('initialize',{clientInfo:{name:'codex_usage_ledger',version:'0.4.1'},capabilities:{experimentalApi:true}});child.stdin.write(JSON.stringify({method:'initialized'})+'\n');}catch(e){this.close();throw e;}
+  try{await this.request('initialize',{clientInfo:{name:'codex_usage_ledger',version:'0.4.2'},capabilities:{experimentalApi:true}});child.stdin.write(JSON.stringify({method:'initialized'})+'\n');}catch(e){this.close();throw e;}
  }
  request(method:string,params?:unknown):Promise<any>{
   if(!['initialize','account/read','account/rateLimits/read','account/usage/read'].includes(method))return Promise.reject(Error('rpc_not_allowlisted'));

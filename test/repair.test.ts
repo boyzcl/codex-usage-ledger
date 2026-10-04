@@ -57,3 +57,35 @@ test('R1 repair retains missing pending candidate facts through repeated rebuild
  const repeated=await repairPreview(first.files.repaired,home,join(dir,'repeat'));assert.equal(repeated.retained_unavailable_candidate_records,1);assert.equal((repeated.legacy as {source_unavailable_candidate_tokens:number}).source_unavailable_candidate_tokens,120);
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('R1 repair merges new rollout quota while preserving old snapshots and repeat is idempotent',{skip:typeof backup!=='function'?'requires sqlite.backup':false},async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'cux-repair-quota-'));try{
+  const {normalizeQuota}=await import('../src/quota.js');
+  const home=join(dir,'source');mkdirSync(join(home,'sessions'),{recursive:true});
+  const oldRaw={limit_id:'synthetic',primary:{used_percent:10,window_minutes:300,resets_at:1791050400}};
+  const newRaw={...oldRaw,primary:{...oldRaw.primary,used_percent:20}};
+  const quotaLine=(raw:unknown)=>line('event_msg',{type:'token_count',rate_limits:raw});
+  const oldLog=normalizeQuota(oldRaw,timestamp,'rollout')[0],official=normalizeQuota(oldRaw,timestamp,'app_server')[0];
+  // Equivalent normalized facts with a different raw representation must not replace old evidence.
+  const original={...oldLog,raw_json:JSON.stringify({...oldRaw,retained_metadata:'synthetic-original'})};
+  const dbPath=join(dir,'old.db'),db=new Ledger(dbPath);db.insertQuota(original);db.insertQuota(official);const before=db.db.prepare('SELECT * FROM quota_snapshots ORDER BY id').all();db.close();
+  writeFileSync(join(home,'sessions','rollout-quota.jsonl'),[meta('quota'),quotaLine(oldRaw),quotaLine(newRaw)].join('\n')+'\n');
+  const first=await repairPreview(dbPath,home,join(dir,'first'));assert.equal(first.added_quota_snapshots,1);
+  const repaired=new Ledger(first.files.repaired),all=repaired.db.prepare('SELECT * FROM quota_snapshots ORDER BY id').all();assert.equal(all.length,3);
+  for(const row of before)assert.deepEqual(repaired.db.prepare('SELECT * FROM quota_snapshots WHERE id=?').get(row.id),row);
+  assert.deepEqual({...repaired.db.prepare('SELECT * FROM quota_snapshots WHERE id=?').get(normalizeQuota(newRaw,timestamp,'rollout')[0].id)},normalizeQuota(newRaw,timestamp,'rollout')[0]);repaired.close();
+  const repeat=await repairPreview(first.files.repaired,home,join(dir,'repeat'));assert.equal(repeat.added_quota_snapshots,0);const repeated=new Ledger(repeat.files.repaired);assert.deepEqual(repeated.db.prepare('SELECT * FROM quota_snapshots ORDER BY id').all(),all);repeated.close();
+  const untouched=new Ledger(dbPath);assert.deepEqual(untouched.db.prepare('SELECT * FROM quota_snapshots ORDER BY id').all(),before);untouched.close();
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('R1 repair same-ID quota fact conflict rejects atomically and keeps baseline evidence',{skip:typeof backup!=='function'?'requires sqlite.backup':false},async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'cux-repair-quota-conflict-'));try{
+  const {normalizeQuota}=await import('../src/quota.js');const home=join(dir,'source');mkdirSync(join(home,'sessions'),{recursive:true});
+  const raw={limit_id:'synthetic',primary:{used_percent:20,window_minutes:300,resets_at:1791050400}},q=normalizeQuota(raw,timestamp,'rollout')[0];
+  const dbPath=join(dir,'old.db'),db=new Ledger(dbPath),prior={...q,used_percent:21};db.insertQuota(prior);const sourceUsage=rows([meta('quota'),usage('new',100)])[0];db.insertUsage({...sourceUsage,model:'old'});const oldRows=db.records();db.close();
+  writeFileSync(join(home,'sessions','rollout-quota.jsonl'),[meta('quota'),line('event_msg',{type:'token_count',rate_limits:raw}),usage('new',100)].join('\n')+'\n');
+  await assert.rejects(repairPreview(dbPath,home,join(dir,'failed')),/repair_quota_fact_conflict/);
+  for(const path of [dbPath,join(dir,'failed','baseline.db'),join(dir,'failed','repaired.db')]){const saved=new Ledger(path);assert.deepEqual({...saved.db.prepare('SELECT * FROM quota_snapshots WHERE id=?').get(q.id)},prior);assert.deepEqual(saved.records(),oldRows);assert.equal(saved.get('ledger_repair_version'),null);saved.close();}
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});

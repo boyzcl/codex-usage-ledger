@@ -45,7 +45,7 @@ export async function repairPreview(input:string,codexHome:string,outDir:string,
   const candidates=fresh.db.prepare('SELECT raw_json,disposition FROM legacy_candidates').all();
   const decisions=new Map(candidates.map(c=>[(JSON.parse(c.raw_json as string) as Usage).id,c.disposition as string]));
   const summary=new Map<string,{date:string;model:string;issue:string;before_records:number;after_records:number;pending_records:number;before_tokens:number;after_tokens:number;pending_fact_tokens:number}>();
-  let changed=0,excluded=0,added=0,retained=0,pending=0,conflicts=0;
+  let changed=0,excluded=0,added=0,retained=0,pending=0,conflicts=0,addedQuota=0;
   const count=(old:Usage|null,next:Usage|null,issue:string)=>{
    for(const [row,side] of [[old,'before_tokens'],[next,'after_tokens']] as const){if(!row)continue;const date=localDay(row.timestamp,timezone),key=JSON.stringify([date,row.model,issue]);
     if(!summary.has(key))summary.set(key,{date,model:row.model,issue,before_records:0,after_records:0,pending_records:0,before_tokens:0,after_tokens:0,pending_fact_tokens:0});const s=summary.get(key)!;s[side]+=row.total_tokens;if(side==='before_tokens')s.before_records++;else s.after_records++;
@@ -59,6 +59,14 @@ export async function repairPreview(input:string,codexHome:string,outDir:string,
   // One commit applies the corrected view, source evidence and version. Interruption rolls it all back.
   corrected.db.prepare('ATTACH DATABASE ? AS reparsed').run(parsedPath);
   corrected.transaction(()=>{
+   // Source snapshots collected after the baseline are append-only. Same-ID facts must agree;
+   // preserve the original raw payload when only representation or extra metadata differs.
+   const quotaConflict=corrected.db.prepare(`SELECT 1 FROM quota_snapshots q JOIN reparsed.quota_snapshots r USING(id)
+    WHERE q.timestamp IS NOT r.timestamp OR q.limit_id IS NOT r.limit_id OR q.slot IS NOT r.slot
+     OR q.window_duration_mins IS NOT r.window_duration_mins OR q.resets_at IS NOT r.resets_at
+     OR q.used_percent IS NOT r.used_percent OR q.source IS NOT r.source LIMIT 1`).get();
+   if(quotaConflict)throw Error('repair_quota_fact_conflict');
+   addedQuota=Number(corrected.db.prepare('INSERT OR IGNORE INTO quota_snapshots SELECT * FROM reparsed.quota_snapshots').run().changes);
    for(const c of corrected.db.prepare('SELECT raw_json FROM legacy_candidates').all()){
     const row=JSON.parse(c.raw_json as string) as Usage;
     corrected.db.prepare('INSERT OR IGNORE INTO legacy_candidate_history VALUES (?,?,?)').run(row.id,c.raw_json,'source_unavailable');
@@ -95,7 +103,7 @@ export async function repairPreview(input:string,codexHome:string,outDir:string,
   });
   const unavailable=corrected.db.prepare("SELECT h.raw_json FROM legacy_candidate_history h WHERE NOT EXISTS (SELECT 1 FROM usage_records u WHERE u.id=h.id) AND NOT EXISTS (SELECT 1 FROM legacy_candidates c WHERE json_extract(c.raw_json,'$.id')=h.id)").all();
   for(const c of unavailable){const row=JSON.parse(c.raw_json as string) as Usage,date=localDay(row.timestamp,timezone),key=JSON.stringify([date,row.model,'retained_unavailable_candidate_fact']);if(!summary.has(key))summary.set(key,{date,model:row.model,issue:'retained_unavailable_candidate_fact',before_records:0,after_records:0,pending_records:0,before_tokens:0,after_tokens:0,pending_fact_tokens:0});const s=summary.get(key)!;s.pending_records++;s.pending_fact_tokens+=row.total_tokens;}
-  const result={version:repairVersion,baseline_captured_at:baselineCapturedAt,source_scan_started_at:sourceScanStartedAt,source_scan_finished_at:sync.synced_at,input_read_only:true,production_overwritten:false,timezone,changed_attribution_records:changed,excluded_records:excluded,new_records:added,retained_source_unavailable_records:retained,pending_records:pending,retained_unavailable_candidate_records:unavailable.length,token_conflicts:conflicts,before:{records:before.length,tokens:before.reduce((n,r)=>n+r.total_tokens,0)},after:{records:corrected.records().length,tokens:corrected.records().reduce((n,r)=>n+r.total_tokens,0)},legacy:corrected.get('legacy_reconciliation'),sync,summary:[...summary.values()].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),files:{baseline,reparsed:parsedPath,repaired:repairedPath},limitations:['Account and quota-window identity remain unverified.','Missing source records are retained; unavailable history is not invented.','Re-attribution uses only originally referenced immutable price rules; unavailable pricing remains null.','Sources are read per file after the database backup; new records may include activity after backup.','Concurrent source changes are deferred; retained rows require later recheck.']};
+  const result={version:repairVersion,baseline_captured_at:baselineCapturedAt,source_scan_started_at:sourceScanStartedAt,source_scan_finished_at:sync.synced_at,input_read_only:true,production_overwritten:false,timezone,added_quota_snapshots:addedQuota,changed_attribution_records:changed,excluded_records:excluded,new_records:added,retained_source_unavailable_records:retained,pending_records:pending,retained_unavailable_candidate_records:unavailable.length,token_conflicts:conflicts,before:{records:before.length,tokens:before.reduce((n,r)=>n+r.total_tokens,0)},after:{records:corrected.records().length,tokens:corrected.records().reduce((n,r)=>n+r.total_tokens,0)},legacy:corrected.get('legacy_reconciliation'),sync,summary:[...summary.values()].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))),files:{baseline,reparsed:parsedPath,repaired:repairedPath},limitations:['Account and quota-window identity remain unverified.','Missing source records are retained; unavailable history is not invented.','Re-attribution uses only originally referenced immutable price rules; unavailable pricing remains null.','Sources are read per file after the database backup; new records may include activity after backup.','Concurrent source changes are deferred; retained rows require later recheck.']};
   writeFileSync(join(outDir,'preview.json'),JSON.stringify(result,null,2)+'\n',{mode:0o600});return result;
  }finally{fresh.close();corrected.close();}
 }
