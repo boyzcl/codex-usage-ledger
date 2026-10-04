@@ -10,6 +10,7 @@ const safe=(s:unknown)=>stripVTControlCharacters(String(s??'未知')).replace(/[
 export function cellWidth(s:string){return [...stripVTControlCharacters(s)].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:/[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6]|\p{Extended_Pictographic}/u.test(c)?2:1),0);}
 function wrap(line:string,width:number){const out:string[]=[];let part='',n=0;for(const c of line){const size=cellWidth(c);if(n+size>width){out.push(part);part='';n=0;}part+=c;n+=size;}out.push(part);return out;}
 const reasons:Record<string,string>={unverified_workspace_billing_identity:'后台账号范围已知，工作区/计费归属仍未完全核实',partial_local_account_window_attribution:'部分本地用量仍未归属，不能外推整体容量',unknown_account_identity:'额度快照缺少可验证账号身份',mixed_account_identity:'额度身份存在冲突，未拼接观测',unverified_local_account_window_attribution:'本地用量与账号及额度窗口的对应关系未知',unverified_account_window_attribution:'账号与额度窗口归属尚未核实',unknown_bucket_model_mapping:'缺少模型与额度窗口的映射',missing_verified_allowance_weights:'缺少已验证的模型额度权重',no_observations:'尚未采到额度数据',insufficient_clean_spans:'可用于推算的消耗区间不足',insufficient_clean_spans_or_coverage:'有效消耗区间或覆盖率不足'};
+Object.assign(reasons,{invalid_historical_window_attribution:'历史记录不在其声明的额度周期内',inconsistent_historical_usage:'组合中含不可用于换算的历史记录',missing_verified_mix_weights_or_prices:'组合中缺少已验证的额度权重或价格',no_matched_tokens:'没有匹配的本地 Token'});
 const issues:Record<string,[string,string]>={
  inconsistent_token_components:['Token 拆分不一致','保留总量；不对不一致的拆分计价。'],inherited_legacy_skipped:['已排除继承记录','去重处理，不代表新增数据丢失。'],legacy_initial_baseline_gap:['旧记录起始基线缺口','首次记录之前的消耗可能无法恢复。'],unrecoverable_usage_gap:['无法恢复的历史用量','现有日志不足，不能凭空补齐。'],unresolved_fork_history:['分叉历史无法确认','无法确认的继承部分未重复计入。'],malformed_line:['日志行格式损坏','该行未入账；其他完整记录继续处理。'],oversized_line_skipped:['日志行超过读取上限','该行已跳过，保留偏移用于排查。'],missing_timestamp:['记录缺少时间','无法按日期归属的记录需要核对。'],invalid_usage_record:['用量字段无效','该记录未作为有效用量入账。']};
 export const errorMessages:Record<string,string>={
@@ -119,7 +120,7 @@ export function format(value:any,options:DisplayOptions={}):string {
    if(c.external_usage_detected)add('发现外部消耗或异常区间，已影响估计。',33);
    if(details){pair('额度观测数',exact(c.observation_count));pair('还缺有效区间',exact(c.missing_clean_spans));pair('还缺变化百分点',exact(c.missing_percent_span));if(c.reason)pair('原因代码',c.reason);
     const mixNames:Record<string,string>={last_7_days:'最近 7 天用量组合',last_30_days:'最近 30 天用量组合',cycle:'本周期用量组合'};
-    for(const [key,mix] of Object.entries(c.equivalents??{}) as [string,any][]){add(mixNames[key]??safe(key));add(mix?`  等效 Token ${num(mix.equivalent_tokens)} · API ${money(mix.equivalent_api_usd)}`:'  暂不可换算');}
+    for(const [key,mix] of Object.entries(c.equivalents??{}) as [string,any][]){add(mixNames[key]??safe(key));add(mix?`  等效 Token ${num(mix.equivalent_tokens)} · API ${money(mix.equivalent_api_usd)}`:'  暂不可换算'+(c.equivalent_reasons?.[key]?'：'+(reasons[c.equivalent_reasons[key]]??'证据不足'):''));}
     for(const span of c.spans??[])add(`${stamp(span.from)} → ${stamp(span.to)}：${exact(span.delta)} 个百分点；${span.candidate==null?'未用于估计':'候选容量 '+num(span.candidate)}`);
    }
   }
@@ -148,6 +149,17 @@ export function format(value:any,options:DisplayOptions={}):string {
   const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','Plan 消耗','100% 等效 Token','API 等效已知小计','计价覆盖率'];
   const table:{cells:string[];bold:boolean}[]=[];
   const dayLabel=(d:string)=>d.slice(5).replace('-','/');
+  const verified=(p:any)=>p.scope?.status==='verified'&&p.scope.account_ref&&p.scope.workspace_ref&&p.scope.billing_source;
+  const cycles=v.plan_cycles.filter(verified);
+  // Display groups are labels for observations only. They never join evidence or percentages into a capacity cycle.
+  const summaries=(plans:any[])=>{
+   const groups=new Map<string,{limit_id:string;slot:string;minutes:number;count:number;from:string;to:string}>();
+   for(const p of plans.filter((p:any)=>!verified(p))){const key=JSON.stringify([p.limit_id,p.slot,p.window_duration_mins]),old=groups.get(key);
+    if(old){old.count+=p.observation_count;old.from=[old.from,p.observed_from].filter(Boolean).sort()[0];old.to=[old.to,p.observed_to].filter(Boolean).sort().at(-1)!;}
+    else groups.set(key,{limit_id:p.limit_id,slot:p.slot,minutes:p.window_duration_mins,count:p.observation_count,from:p.observed_from,to:p.observed_to});
+   }
+   return [...groups.values()];
+  };
   if(v.legacy_reconciliation?.conflict_records)add('争议用量记录：'+num(v.legacy_reconciliation.conflict_records)+' 条；双方证据保留，未计入确认用量，数量待核对。',33);
   if(v.legacy_reconciliation?.pending_tokens)add('待核对的分叉 Token：'+num(v.legacy_reconciliation.pending_tokens)+'；未计入确认用量。',33);
   if(v.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(v.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
@@ -163,11 +175,13 @@ export function format(value:any,options:DisplayOptions={}):string {
   }};
   for(const day of v.daily){
    const label=dayLabel(day.date)+(day.ongoing?' 至今':'');
-   record(label,day.totals.records?'当日合计':'无记录',day.totals,day.current_price_valuation,day.plans,true);
-   modelRows('↳',day.models);if(day.plans.length>1)planRows(day.plans,'↳');
+   const plans=day.plans.filter(verified);
+   record(label,day.totals.records?'当日合计':'无记录',day.totals,day.current_price_valuation,plans,true);
+   modelRows('↳',day.models);if(plans.length>1)planRows(plans,'↳');
+   for(const s of summaries(day.plans))table.push({cells:['↳',`观测 · ${safe(s.limit_id)} / ${safe(s.slot)} · ${windowName(s.minutes)} · ${exact(s.count)} 条`,'—','—','—','—','—','—','—','—'],bold:false});
   }
-  record('区间合计','全部模型',v.totals,v.current_price_valuation,v.plan_cycles,true);modelRows('↳',v.models);
-  if(v.plan_cycles.length>1)planRows(v.plan_cycles,'区间分段');
+  record('区间合计','全部模型',v.totals,v.current_price_valuation,cycles,true);modelRows('↳',v.models);
+  if(cycles.length>1)planRows(cycles,'区间分段');
   // All ten columns remain in a single table. Cells wrap inside their own column;
   // extremely narrow terminals use a labeled row rather than dropping columns.
   if(width<64){
@@ -179,21 +193,25 @@ export function format(value:any,options:DisplayOptions={}):string {
    print(headers,true);add(widths.map(w=>'─'.repeat(w)).join('┼'),2);
    for(const [i,r] of table.entries()){if(i&&r.bold)add(widths.map(w=>'─'.repeat(w)).join('┼'),2);print(r.cells,r.bold);}
   }
-  if(v.daily_basis?.strict_reason)add('严格容量估算不可用：账号与额度窗口归属尚未核实。'+(v.daily_basis.experimental_empirical?'以下容量为显式实验经验外推。':''),33);
+  if(v.daily_basis?.strict_reason)add('严格容量估算不可用：账号与额度窗口归属尚未核实。'+(v.daily_basis.experimental_empirical?'已启用显式实验经验外推；缺少证据时仍为空。':''),33);
   add();add('— 表示无记录、不可估计或未做模型额度归因，不代表 0。',2);
   add('* Plan 仅统计已观测时段；Token 列是全日/至今用量，反推只使用匹配时段的 Token。',2);
   add('API 金额为按当前价格重估的已知小计，并非订阅账单；模型行不可与合计再次相加。',2);
   add('100% 等效 Token 是经验外推，并非官方上限；假设模型/速度/缓存组合不变且无未记录消耗。',2);
-  if(v.plan_cycles.length>1)add('存在多个额度窗口或重置周期，分别列示；不同周期的百分比不合并。',33);
+  if(cycles.length>1)add('存在多个额度窗口或重置周期，分别列示；不同周期的百分比不合并。',33);
+  if(v.plan_cycles.some((p:any)=>!verified(p)))add('未知归属的快照按日期和额度桶标签摘要展示；不拼接百分比、不推算容量。独立证据保留在 JSON 输出。',2);
   const reasons:Record<string,string>={unverified_workspace_billing_identity:'后台账号范围已知，工作区/计费归属仍未完全核实',partial_local_account_window_attribution:'部分本地用量仍未归属，不能外推整体容量',unknown_account_identity:'额度快照缺少可验证账号身份',mixed_account_identity:'额度身份存在冲突，未拼接观测',unverified_local_account_window_attribution:'本地用量与账号及额度窗口的对应关系未知',unverified_account_window_attribution:'账号与额度窗口归属尚未核实',conflicting_snapshots:'同一时刻额度快照冲突',no_observations:'缺少成对观测',small_percent_change:'变化不足 5 个百分点',percent_decrease:'区间内百分比回退',external_usage_suspected:'存在疑似外部消耗',inconsistent_tokens:'Token 数据不一致',saturated:'额度已达 100%，观测受上限影响',no_matched_tokens:'没有匹配的本地 Token'};
   const emptyDays=v.daily.filter((d:any)=>!d.plans.length).map((d:any)=>dayLabel(d.date));
   if(emptyDays.length)add('无官方成对快照的日期不估算 Plan 消耗或容量。',2);
-  for(const day of v.daily){for(const [i,p] of day.plans.entries()){
-   const prefix=dayLabel(day.date)+(day.plans.length>1?` 窗口 ${i+1}`:'');
+  for(const day of v.daily){
+   for(const s of summaries(day.plans))add(`${dayLabel(day.date)} 观测摘要：${safe(s.limit_id)} / ${safe(s.slot)} / ${windowName(s.minutes)}；${exact(s.count)} 条；${stamp(s.from)} → ${stamp(s.to)}；归属未知。`,2);
+   const plans=day.plans.filter(verified);
+   for(const [i,p] of plans.entries()){
+   const prefix=dayLabel(day.date)+(plans.length>1?` 窗口 ${i+1}`:'');
    add(`${prefix}：${stamp(p.observed_from)} → ${stamp(p.observed_to)}${p.reason?'；'+(reasons[p.reason]??'证据不足'):''}${p.flags.includes('sampling_gap')?'；存在超过 30 分钟的采样空档':''}`,2);
    if(details){pair('匹配时段 Token',num(p.matched_tokens));pair('原始变化',exact(p.percent_points)+' 个百分点');pair('额度标识',`${p.limit_id} / ${p.slot} / ${p.window_duration_mins} 分钟`);pair('周期重置',stamp(new Date(p.resets_at*1000).toISOString()));if(p.flags.length)pair('观测标记',p.flags.join(', '));}
   }}
-  for(const [i,p] of v.plan_cycles.entries())if(v.plan_cycles.length>1||details)add(`区间${v.plan_cycles.length>1?'窗口 '+(i+1):'合计'}：${safe(p.limit_id)} / ${windowName(p.window_duration_mins)} / ${p.slot} / 重置 ${stamp(new Date(p.resets_at*1000).toISOString())}${details?'':':'+String(new Date(p.resets_at*1000).getUTCSeconds()).padStart(2,'0')}；匹配 Token ${num(p.matched_tokens)}`,2);
+  for(const [i,p] of cycles.entries())if(cycles.length>1||details)add(`区间${cycles.length>1?'窗口 '+(i+1):'合计'}：${safe(p.limit_id)} / ${windowName(p.window_duration_mins)} / ${p.slot} / 重置 ${stamp(new Date(p.resets_at*1000).toISOString())}${details?'':':'+String(new Date(p.resets_at*1000).getUTCSeconds()).padStart(2,'0')}；匹配 Token ${num(p.matched_tokens)}`,2);
  }
  function syncResult(v:any){title('同步结果');section('本地记录');pair('新增记录',exact(v.rollout?.added_records));pair('变化文件',exact(v.rollout?.changed_files));pair('检查文件',exact(v.rollout?.files));if(v.rollout?.malformed_or_oversized_lines)add('发现损坏或超限日志行，请运行 cux doctor 查看。',33);pair('完成时间',stamp(v.rollout?.synced_at));section('官方数据');collection(v.account);}
  if(command==='status'){

@@ -1,7 +1,7 @@
 import {DatabaseSync} from './sqlite.js';
 import {tokenFields,type Usage,type Quota,type PriceRule,type ParseState} from './types.js';
 import {hash,normalizeQuota,legacyQuotaId} from './quota.js';
-import {quotaContext,quotaCycleKey,scopeKey,redactIdentity,officialSnapshot,recoveredContext,mergeContexts,type QuotaContext} from './quota-policy.js';
+import {quotaContext,quotaCycleKey,scopeKey,redactIdentity,officialSnapshot,recoveredContext,mergeContexts,contextFingerprint,type QuotaContext} from './quota-policy.js';
 import {sameFacts,sameContext,authorityUpgrade,contextKeys,usageDecision,type UsageIntent} from './usage-policy.js';
 import {priceUsage} from './pricing.js';
 export class Ledger {
@@ -113,7 +113,12 @@ export class Ledger {
  insertQuota(q:Quota){
   const legacy=q.context?this.db.prepare('SELECT * FROM quota_snapshots WHERE id=?').get(legacyQuotaId(q)):undefined;
   if(legacy&&q.context&&legacy.id!==q.id){const old=this.quotaProjection(legacy as unknown as Quota);
-   if(scopeKey(quotaContext(old).scope)===scopeKey(q.context.scope)&&['timestamp','limit_id','slot','window_duration_mins','resets_at','used_percent','source','raw_json'].every(k=>legacy[k]===q[k as keyof Quota]))q={...q,id:old.id};
+   if(['timestamp','limit_id','slot','window_duration_mins','resets_at','used_percent','source','raw_json'].every(k=>legacy[k]===q[k as keyof Quota])){
+    const context=quotaContext(old);
+    // A mixed recovery still represents every referenced original response. Replaying one must not split it into new facts.
+    if(context.evidence?.context_refs.includes(contextFingerprint(q.context)))return;
+    if(scopeKey(context.scope)===scopeKey(q.context.scope))q={...q,id:old.id};
+   }
   }
   this.db.prepare('INSERT OR IGNORE INTO quota_snapshots VALUES (?,?,?,?,?,?,?,?,?)').run(q.id,q.timestamp,q.limit_id,q.slot,q.window_duration_mins,q.resets_at,q.used_percent,q.source,q.raw_json);if(q.context)this.saveQuotaContext(q.id,q.context);}
  private saveQuotaContext(id:string,context:QuotaContext){

@@ -14,8 +14,8 @@ import {workloadRanges,workloadViews,currentWorkload} from '../src/workload.js';
 import {initialState,parseLine} from '../src/parser.js';
 import {collectAccount} from '../src/app-server.js';
 import {exportData} from '../src/export.js';
-import {format} from '../src/display.js';
-import type {Usage,Quota,Config} from '../src/types.js';
+import {format,cellWidth} from '../src/display.js';
+import type {Usage,Quota,Config,PriceRule} from '../src/types.js';
 const from='2026-10-03T00:00:00.000Z',end='2026-10-03T05:00:00.000Z',reset=Date.parse(end)/1000;
 const range={from,to_exclusive:end,timezone:'UTC'};
 const config:Config={codex_home:'/unused',timezone:'UTC',poll_seconds:60,codex_binary:'/unused',estimator:{weight_basis:'verified',bucket_models:{codex:['a'],other:['b']}}};
@@ -91,4 +91,62 @@ test('B repair rejects conflicting same-fact contexts atomically',{skip:typeof b
   assert.equal(t.db.quotas().length,1);assert.equal(t.db.quotas()[0].context!.scope.account_ref,original.context!.scope.account_ref);assert.equal(t.db.get('ledger_repair_version'),null);
   const failed=new Ledger(join(t.dir,'failed','repaired.db'));assert.equal(failed.get('ledger_repair_version'),null);assert.equal(failed.quotas()[0].context!.scope.account_ref,original.context!.scope.account_ref);failed.close();
  }finally{t.close();}
+});
+
+test('B historical equivalents use proven same-category past cycles while current capacity stays exact-window',()=>{
+ const at='2026-10-04T04:30:00.000Z',currentReset=Date.parse('2026-10-04T05:00:00.000Z')/1000;
+ const qs=[1,2,3,4].map((hour,i)=>({...q(`2026-10-04T0${hour}:00:00.000Z`,10*(i+1)),resets_at:currentReset}));
+ const current=[1,2,3].map(hour=>attach({...usage(`2026-10-04T0${hour}:30:00.000Z`,100),service_tier:'default'},qs[0]));
+ const oldQuota=q('2026-10-03T02:00:00.000Z',20);
+ const old=attach({...usage('2026-10-03T02:30:00.000Z',3000),service_tier:'default',cached_input_tokens:3000,uncached_input_tokens:0,allowance_weight:300,api_equivalent_usd:.0006},oldQuota);
+ const rule:PriceRule={id:'mix-api',kind:'api',model:'a',processing_mode:'standard',effective_from:'2026-01-01T00:00:00.000Z',effective_to:null,context_min:0,context_max:null,rates:{input:1,cached_input:.2,cache_write:1,output:1},source_url:'https://example.com/synthetic',retrieved_at:at,basis:'synthetic'};
+ const rules=[rule,{...rule,id:'mix-allowance',kind:'allowance' as const,rates:{input:1e6,cached_input:1e5,cache_write:1e6,output:1e6}}];
+ const estimate=(extra:Usage[])=>quotaEstimates(qs,[...current,...extra],config,rules,at)[0];
+ const result=estimate([old]);assert.equal(result.estimated_capacity,1000);assert.equal(result.attribution_reason,null);
+ assert.equal((result.equivalents.cycle as any).equivalent_tokens,1000);
+ for(const key of ['last_7_days','last_30_days','a_standard_observed_token_type_mix']){
+  assert.equal((result.equivalents[key] as any).equivalent_tokens,5500,key);assert.equal(result.equivalent_reasons[key],null);
+  assert.ok(Math.abs((result.equivalents[key] as any).equivalent_api_usd-.0015)<1e-12,key);
+ }
+ // Proven other identities/categories must not enter this mix; future and pre-30-day facts do not enter it either.
+ for(const dimension of ['account_ref','workspace_ref','billing_source'] as const){const other=structuredClone(old);other.quota_attribution!.scope[dimension]='other';assert.equal((estimate([old,other]).equivalents.last_30_days as any).equivalent_tokens,5500,dimension);}
+ for(const dimension of ['limit_id','slot','window_duration_mins'] as const){const other=structuredClone(old);if(dimension==='window_duration_mins')other.quota_attribution![dimension]=10080;else other.quota_attribution![dimension]='other';assert.equal((estimate([old,other]).equivalents.last_30_days as any).equivalent_tokens,5500,dimension);}
+ const outside={...old,timestamp:'2026-09-01T02:30:00.000Z'},future={...old,timestamp:'2026-10-04T04:30:00.001Z'};
+ assert.equal((estimate([old,outside,future]).equivalents.last_30_days as any).equivalent_tokens,5500);
+ const eightDaysAgo=attach({...old,timestamp:'2026-09-26T02:30:00.000Z'}, {...oldQuota,resets_at:Date.parse('2026-09-26T05:00:00.000Z')/1000});
+ assert.equal((estimate([eightDaysAgo]).equivalents.last_7_days as any).equivalent_tokens,1000);assert.equal((estimate([eightDaysAgo]).equivalents.last_30_days as any).equivalent_tokens,5500);
+ for(const bad of [{...old,quota_attribution:undefined},{...old,allowance_weight:null},{...old,api_equivalent_usd:null},{...old,quota_attribution:{...old.quota_attribution!,resets_at:currentReset}}]){
+  const invalid=estimate([bad]);assert.equal(invalid.estimated_capacity,1000);assert.equal((invalid.equivalents.cycle as any).equivalent_tokens,1000);
+  assert.equal(invalid.equivalents.last_7_days,null);assert.equal(invalid.equivalents.last_30_days,null);assert.ok(invalid.equivalent_reasons.last_30_days);
+ }
+ const unmapped=estimate([{...old,quota_attribution:undefined}]);assert.equal(unmapped.equivalents.a_standard_observed_token_type_mix,null);assert.equal(unmapped.equivalent_reasons.a_standard_observed_token_type_mix,'partial_local_account_window_attribution');
+ const incomplete=estimate([{...old,quota_attribution:{...old.quota_attribution!,limit_id:''}}]);assert.equal(incomplete.equivalents.last_30_days,null);assert.equal(incomplete.equivalent_reasons.last_30_days,'partial_local_account_window_attribution');
+});
+
+test('B ambiguous recovery replays both original contexts without new facts and preserves genuinely new evidence',()=>{
+ const t=temp();try{
+  const raw=(accountId:string,usedPercent=20)=>({accountId,ordinaryUsageAllowed:true,rateLimits:{limitId:'codex',primary:{usedPercent,windowDurationMins:300,resetsAt:reset}}});
+  const a=normalizeQuota(raw('PRIVATE_A'),from,'app_server')[0],old={...a,id:legacyQuotaId(a)};delete old.context;t.db.insertQuota(old);
+  for(const account of ['PRIVATE_A','PRIVATE_B'])t.db.observe('app_server','account/rateLimits/read','ok',{response:raw(account)},from);
+  t.db.db.prepare('DELETE FROM settings WHERE key=?').run('quota_context_version');t.db.close();t.db=new Ledger(t.path);
+  const facts=t.db.db.prepare('SELECT * FROM quota_snapshots').all(),contexts=t.db.db.prepare('SELECT * FROM quota_context').all();
+  for(let i=0;i<2;i++)for(const account of ['PRIVATE_A','PRIVATE_B'])t.db.insertQuota(normalizeQuota(raw(account),from,'app_server')[0]);
+  assert.deepEqual(t.db.db.prepare('SELECT * FROM quota_snapshots').all(),facts);assert.deepEqual(t.db.db.prepare('SELECT * FROM quota_context').all(),contexts);
+  assert.equal(t.db.quotas()[0].context!.scope.status,'mixed');assert.equal(t.db.quotas()[0].context!.scope.account_ref,null);
+  for(const next of [raw('PRIVATE_C'),raw('PRIVATE_A',21),{...raw('PRIVATE_A'),ordinaryUsageAllowed:false}])t.db.insertQuota(normalizeQuota(next,from,'app_server')[0]);
+  assert.equal(t.db.quotas().length,4);assert.deepEqual(t.db.db.prepare('SELECT * FROM quota_context WHERE id=?').get(old.id),contexts[0]);
+  t.db.close();t.db=new Ledger(t.path);assert.equal(t.db.quotas().length,4);assert.equal(t.db.quotas().find(q=>q.id===old.id)!.context!.scope.status,'mixed');
+ }finally{t.close();}
+});
+
+test('B human daily report summarizes unknown-scope observations by date and bucket without capacity cycles',()=>{
+ const qs=Array.from({length:100},(_,i)=>{const value=q(`2026-10-03T01:${String(Math.floor(i/2)).padStart(2,'0')}:00.000Z`,i%100);value.id+='-'+i;value.context!.scope={...value.context!.scope,status:'partial',workspace_ref:null,billing_source:null};if(i%2)value.slot='secondary';return value;});
+ const report=dailyReport([],qs,[],range,end,{experimentalEmpirical:true});assert.equal(report.plan_cycles.length,100);
+ const before=JSON.stringify(report);
+ for(const width of [40,80,180])for(const details of [false,true]){
+  const human=format(report,{command:'report',width,details,timezone:'UTC',now:Date.parse(end)});
+  assert.doesNotMatch(human,/窗口 \d|区间分段|周期重置|原始变化/);assert.match(human,/观测摘要/);assert.match(human,/50 条/);
+  assert.equal((human.match(/观测摘要/g)??[]).length,2);assert.ok(human.split('\n').every(line=>cellWidth(line)<=width));
+ }
+ assert.equal(JSON.stringify(report),before);assert.ok(report.plan_cycles.every(p=>p.estimated_tokens===null&&p.percent_points===null));
 });

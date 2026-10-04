@@ -1,4 +1,4 @@
-import {quotaCycleKey,quotaContext,attributedTo,allocationReason} from './quota-policy.js';
+import {quotaCycleKey,quotaContext,attributedTo,attributedToCategory,allocationReason,historicalAllocationReason} from './quota-policy.js';
 import {workloadRanges} from './workload.js';
 import type {Quota,Usage,PriceRule,Config} from './types.js';
 import {mode,priceUsage} from './pricing.js';
@@ -60,17 +60,25 @@ export function quotaEstimates(quotas:Quota[],usage:Usage[],config:Config,rules:
   if(attribution)result={...result,...empty(attribution),spans:[],external_usage_detected:false};
   const cap=result.estimated_capacity;
   const mixes:Record<string,unknown>={};
+  const mixReasons:Record<string,string|null>={};
   if(cap!==null){for(const range of workloadRanges([q],now,config.timezone).ranges){const name=range.name===key?'cycle':range.name,start=range.from;
-   const mix=allocated.filter(x=>x.timestamp>=start&&x.timestamp<range.to_exclusive&&models?.includes(x.model));let amount=0,total=0,money=0,complete=true;
+   const historical=name!=='cycle',rows=usage.filter(x=>x.timestamp>=start&&x.timestamp<range.to_exclusive);
+   let reason=historicalAllocationReason(q,rows);
+   const mix=rows.filter(x=>historical?attributedToCategory(x,q):attributedTo(x,q));let amount=0,total=0,money=0,complete=!reason;
    for(const r of mix){const w=experimental?proxyWeight(r):r.allowance_weight;if(w===null||r.api_equivalent_usd===null){complete=false;break;}amount+=w;total+=r.total_tokens;money+=r.api_equivalent_usd;}
-   mixes[name]=complete&&amount>0?{equivalent_tokens:cap*total/amount,equivalent_api_usd:cap*money/amount}:null;
+   if(mix.some(r=>!models?.includes(r.model)))reason='unknown_bucket_model_mapping';
+   if(mix.some(r=>r.source!=='token_usage_record'||r.data_quality==='inconsistent'))reason='inconsistent_historical_usage';
+   mixReasons[name]=reason??(!complete?'missing_verified_mix_weights_or_prices':amount<=0?'no_matched_tokens':null);
+   mixes[name]=!mixReasons[name]?{equivalent_tokens:cap*total/amount,equivalent_api_usd:cap*money/amount}:null;
   }
   // A single model still needs an explicit token-type mixture; use observed mix with tier Standard.
-  for(const model of models??[]){const mix=allocated.filter(x=>x.model===model&&x.timestamp>=new Date(Date.parse(now)-30*864e5).toISOString()&&x.timestamp<=now);let amount=0,total=0,money=0,valid=mix.length>0;
+  for(const model of models??[]){const rows=usage.filter(x=>x.timestamp>=new Date(Date.parse(now)-30*864e5).toISOString()&&x.timestamp<=now),name=model+'_standard_observed_token_type_mix';
+   const mix=rows.filter(x=>attributedToCategory(x,q)&&x.model===model),reason=historicalAllocationReason(q,rows)??(mix.some(r=>r.source!=='token_usage_record'||r.data_quality==='inconsistent')?'inconsistent_historical_usage':null);let amount=0,total=0,money=0,valid=!reason&&mix.length>0;
    for(const u of mix){const priced=priceUsage({...u,timestamp:now,service_tier:'default'},rules);const w=experimental?proxyWeight(priced):priced.allowance_weight;if(w===null||priced.api_equivalent_usd===null){valid=false;break;}amount+=w;total+=u.total_tokens;money+=priced.api_equivalent_usd;}
-   mixes[model+'_standard_observed_token_type_mix']=valid&&amount>0?{equivalent_tokens:cap*total/amount,equivalent_api_usd:cap*money/amount}:null;
+   mixReasons[name]=reason??(!valid||amount<=0?'missing_verified_mix_weights_or_prices':null);
+   mixes[name]=!mixReasons[name]?{equivalent_tokens:cap*total/amount,equivalent_api_usd:cap*money/amount}:null;
   }}
-  out.push({as_of:now,scope:quotaContext(q).scope,availability:quotaContext(observations.at(-1)!).availability,attribution_reason:attribution,missing_prerequisites:[...prerequisites,...(attribution?[attribution]:[])],strict_reason:attribution??result.reason??'unverified_account_window_attribution',cycle:key,limit_id:q.limit_id,window_duration_mins:q.window_duration_mins,resets_at:q.resets_at,slot:q.slot,basis:experimental?'experimental_credit_proxy':'verified_allowance',assumption:experimental?'Credit rates proxy included allowance; model mapping is user-supplied, not official.':null,observation_count:observations.length,...result,equivalents:mixes});
+  out.push({as_of:now,scope:quotaContext(q).scope,availability:quotaContext(observations.at(-1)!).availability,attribution_reason:attribution,missing_prerequisites:[...prerequisites,...(attribution?[attribution]:[])],strict_reason:attribution??result.reason??'unverified_account_window_attribution',cycle:key,limit_id:q.limit_id,window_duration_mins:q.window_duration_mins,resets_at:q.resets_at,slot:q.slot,basis:experimental?'experimental_credit_proxy':'verified_allowance',assumption:experimental?'Credit rates proxy included allowance; model mapping is user-supplied, not official.':null,observation_count:observations.length,...result,equivalents:mixes,equivalent_reasons:mixReasons});
  }return out;
 }
 function proxyWeight(u:Usage):number|null{

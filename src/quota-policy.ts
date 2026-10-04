@@ -31,8 +31,21 @@ export function scopeReason(q:Quota):string|null {
  return scope.status==='mixed'?'mixed_account_identity':!scope.account_ref?'unknown_account_identity':scope.status!=='verified'||!scope.workspace_ref||!scope.billing_source?'unverified_workspace_billing_identity':null;
 }
 export function attributedTo(u:Usage,q:Quota):boolean {
+ return attributedToCategory(u,q)&&u.quota_attribution!.resets_at===q.resets_at;
+}
+export function attributedToCategory(u:Usage,q:Quota):boolean {
  const a=u.quota_attribution;if(!a||a.source!=='source_event'||scopeReason(q))return false;
- return !!a.scope.account_ref&&a.scope.status!=='mixed'&&scopeKey(a.scope)===scopeKey(quotaContext(q).scope)&&a.limit_id===q.limit_id&&a.slot===q.slot&&a.window_duration_mins===q.window_duration_mins&&a.resets_at===q.resets_at;
+ return scopeKey(a.scope)===scopeKey(quotaContext(q).scope)&&a.limit_id===q.limit_id&&a.slot===q.slot&&a.window_duration_mins===q.window_duration_mins;
+}
+export function historicalAllocationReason(q:Quota,rows:Usage[]):string|null {
+ const identity=scopeReason(q);if(identity)return identity;
+ for(const row of rows){
+  const a=row.quota_attribution;
+  if(!a||a.source!=='source_event'||a.scope.status!=='verified'||!a.scope.account_ref||!a.scope.workspace_ref||!a.scope.billing_source||!a.limit_id||!a.slot||!Number.isFinite(a.window_duration_mins)||a.window_duration_mins<=0||!Number.isFinite(a.resets_at))return 'partial_local_account_window_attribution';
+  // Each source event must belong to its own declared historical cycle, rather than the current reset.
+  if(attributedToCategory(row,q)&&(!Number.isFinite(a.resets_at)||Date.parse(row.timestamp)<(a.resets_at-a.window_duration_mins*60)*1000||Date.parse(row.timestamp)>=a.resets_at*1000))return 'invalid_historical_window_attribution';
+ }
+ return null;
 }
 export function allocationReason(q:Quota,rows:Usage[]):string|null {
  const identity=scopeReason(q);if(identity)return identity;
@@ -55,9 +68,9 @@ export function officialSnapshot(raw:any,timestamp:string){
 export function recoveredContext(context:QuotaContext,id:number):QuotaContext {
  return {...context,evidence:{source:'app_server',method:'account/rateLimits/read',origin:'recovered_observation',observation_ids:[id],context_refs:[]}};
 }
+export const contextFingerprint=(c:QuotaContext)=>createHash('sha256').update(JSON.stringify([c.scope,c.availability])).digest('hex');
 export function mergeContexts(old:QuotaContext|undefined,next:QuotaContext):QuotaContext {
- const fingerprint=(c:QuotaContext)=>createHash('sha256').update(JSON.stringify([c.scope,c.availability])).digest('hex');
- const references=[...new Set([...(old?.evidence?.context_refs??[]),...(old&&!old.evidence?.context_refs.length?[fingerprint(old)]:[]),...(next.evidence?.context_refs.length?next.evidence.context_refs:[fingerprint(next)])])].sort();
+ const references=[...new Set([...(old?.evidence?.context_refs??[]),...(old&&!old.evidence?.context_refs.length?[contextFingerprint(old)]:[]),...(next.evidence?.context_refs.length?next.evidence.context_refs:[contextFingerprint(next)])])].sort();
  const ids=[...new Set([...(old?.evidence?.observation_ids??[]),...(next.evidence?.observation_ids??[])])].sort((a,b)=>a-b);
  const ambiguous=old?.scope.status==='mixed'||references.length>1;
  const evidence:QuotaContext['evidence']={source:next.availability.source,method:next.evidence?.method??null,origin:ambiguous?'ambiguous_observations':old?.evidence?.origin==='recovered_observation'||next.evidence?.origin==='recovered_observation'?'recovered_observation':next.evidence?.origin??'missing',observation_ids:ids,context_refs:references};
