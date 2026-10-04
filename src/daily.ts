@@ -8,7 +8,7 @@ export interface Empirical {
  basis:'observed_mix_extrapolation';observed_from:string|null;observed_to:string|null;observation_count:number;
  percent_points:number|null;matched_tokens:number;matched_api_known_usd:number;priced_tokens:number;
  model_tokens:Record<string,number>;segments:{from:string;to:string;percent_points:number;tokens:number;from_percent:number;to_percent:number}[];
- flags:string[];partial:boolean;estimated_tokens:number|null;estimated_api_known_usd:number|null;api_token_coverage:number|null;
+ snapshots?:{timestamp:string;used_percent:number}[];strict_reason?:string;experimental?:boolean;flags:string[];partial:boolean;estimated_tokens:number|null;estimated_api_known_usd:number|null;api_token_coverage:number|null;
  rounding_only_lower:number|null;rounding_only_upper:number|null;reason:string|null;
 }
 function finish(p:Empirical):Empirical {
@@ -34,7 +34,7 @@ export function empiricalPlans(rows:Usage[],quotas:Quota[],range:Range):Empirica
   const unique=qs.filter((q,i)=>i===0||q.timestamp!==qs[i-1].timestamp);
   const q=qs[0],flags:string[]=[];
   if(qs.some((r,i)=>i&&r.timestamp===qs[i-1].timestamp&&r.used_percent!==qs[i-1].used_percent))flags.push('conflicting_snapshots');
-  const p:Empirical={cycle,limit_id:q.limit_id,slot:q.slot,window_duration_mins:q.window_duration_mins!,resets_at:q.resets_at!,basis:'observed_mix_extrapolation',observed_from:unique[0]?.timestamp??null,observed_to:unique.at(-1)?.timestamp??null,observation_count:unique.length,percent_points:null,matched_tokens:0,matched_api_known_usd:0,priced_tokens:0,model_tokens:{},segments:[],flags,partial:true,estimated_tokens:null,estimated_api_known_usd:null,api_token_coverage:null,rounding_only_lower:null,rounding_only_upper:null,reason:null};
+  const p:Empirical={cycle,limit_id:q.limit_id,slot:q.slot,window_duration_mins:q.window_duration_mins!,resets_at:q.resets_at!,basis:'observed_mix_extrapolation',observed_from:unique[0]?.timestamp??null,observed_to:unique.at(-1)?.timestamp??null,observation_count:unique.length,percent_points:null,matched_tokens:0,matched_api_known_usd:0,priced_tokens:0,model_tokens:{},segments:[],snapshots:unique.map(({timestamp,used_percent})=>({timestamp,used_percent})),flags,partial:true,estimated_tokens:null,estimated_api_known_usd:null,api_token_coverage:null,rounding_only_lower:null,rounding_only_upper:null,reason:null};
   let anchor=unique[0],last=anchor;
   const close=()=>{if(!anchor||!last||anchor===last)return;
    const matched=rows.filter(r=>r.timestamp>anchor.timestamp&&r.timestamp<=last.timestamp);
@@ -70,16 +70,19 @@ export function combinePlans(plans:Empirical[]):Empirical[]{
   old.observation_count+=p.observation_count;old.percent_points=old.percent_points===null&&p.percent_points===null?null:(old.percent_points??0)+(p.percent_points??0);
   old.matched_tokens+=p.matched_tokens;old.matched_api_known_usd+=p.matched_api_known_usd;old.priced_tokens+=p.priced_tokens;
   for(const [model,tokens] of Object.entries(p.model_tokens))old.model_tokens[model]=(old.model_tokens[model]??0)+tokens;
-  old.segments.push(...p.segments);old.flags=[...new Set([...old.flags,...p.flags])];old.partial||=p.partial;
+  old.snapshots=[...(old.snapshots??[]),...(p.snapshots??[])];old.segments.push(...p.segments);old.flags=[...new Set([...old.flags,...p.flags])];old.partial||=p.partial;
  }
  return [...map.values()].map(p=>{
+  const chain=(p.snapshots??[]).slice().sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
+  if(chain.some((s,i)=>i>0&&s.used_percent<chain[i-1].used_percent))p.flags=[...new Set([...p.flags,'percent_decrease'])];
+  if(chain.some((s,i)=>i>0&&s.timestamp===chain[i-1].timestamp&&s.used_percent!==chain[i-1].used_percent))p.flags=[...new Set([...p.flags,'conflicting_snapshots'])];
   const ordered=p.segments.slice().sort((a,b)=>a.from.localeCompare(b.from));
   if(ordered.some((s,i)=>i>0&&s.from_percent<ordered[i-1].to_percent))p.flags=[...new Set([...p.flags,'percent_decrease'])];
   if(p.flags.includes('conflicting_snapshots'))p.percent_points=null;
   return finish({...p,estimated_tokens:null,estimated_api_known_usd:null,rounding_only_lower:null,rounding_only_upper:null});
  });
 }
-export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:Range,at=new Date().toISOString()){
+export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:Range,at=new Date().toISOString(),options:{experimentalEmpirical?:boolean}={}){
  const base=report(rows,rules,at),priced=rows.map(r=>priceUsage({...r,timestamp:at},rules)).map((r,i)=>({...r,timestamp:rows[i].timestamp}));
  const rowGroups=new Map<string,Usage[]>(),priceGroups=new Map<string,Usage[]>();
  // Reuse the formatter: a large historical report must not build one Intl formatter per record.
@@ -99,5 +102,13 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
   daily.push({date,from,to_exclusive:to,ongoing:date===localDay(at,range.timezone)&&range.to_exclusive>at,totals:aggregate(group),models,current_price_valuation:aggregate(pg),plans:from<to?empiricalPlans(pg,quotas,{...range,from,to_exclusive:to}):[]});
  }
  const modelsCurrent=Object.fromEntries(Object.keys(base.models).map(model=>[model,{...base.models[model],current_price_valuation:aggregate(priced.filter(r=>r.model===model)),plan_percent_points:null,estimated_plan_tokens:null}]));
- return {...base,display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:combinePlans(daily.flatMap(d=>d.plans)),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
+ const cycles=combinePlans(daily.flatMap(d=>d.plans));
+ const restrict=(p:Empirical)=>{p.strict_reason='unverified_account_window_attribution';p.experimental=!!options.experimentalEmpirical;
+  if(!options.experimentalEmpirical){p.estimated_tokens=null;p.estimated_api_known_usd=null;p.rounding_only_lower=null;p.rounding_only_upper=null;p.reason??=p.strict_reason;}return p;};
+ for(const d of daily)d.plans=d.plans.map(p=>{
+  const invalid=cycles.find(c=>c.cycle===p.cycle)?.flags.filter(f=>f==='percent_decrease'||f==='conflicting_snapshots')??[];
+  if(invalid.length){p.flags=[...new Set([...p.flags,...invalid])];p=finish({...p,estimated_tokens:null,estimated_api_known_usd:null,rounding_only_lower:null,rounding_only_upper:null});}
+  return restrict(p);
+ });
+ return {...base,display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:cycles.map(restrict),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,experimental_empirical:!!options.experimentalEmpirical,strict_reason:'unverified_account_window_attribution',allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
 }

@@ -9,7 +9,7 @@ const percent=(ratio:unknown)=>valid(ratio)?`${exact(Number((ratio*100).toFixed(
 const safe=(s:unknown)=>stripVTControlCharacters(String(s??'未知')).replace(/[\p{Cc}\p{Cf}]/gu,' ');
 export function cellWidth(s:string){return [...stripVTControlCharacters(s)].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:/[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6]|\p{Extended_Pictographic}/u.test(c)?2:1),0);}
 function wrap(line:string,width:number){const out:string[]=[];let part='',n=0;for(const c of line){const size=cellWidth(c);if(n+size>width){out.push(part);part='';n=0;}part+=c;n+=size;}out.push(part);return out;}
-const reasons:Record<string,string>={unknown_bucket_model_mapping:'缺少模型与额度窗口的映射',missing_verified_allowance_weights:'缺少已验证的模型额度权重',no_observations:'尚未采到额度数据',insufficient_clean_spans:'可用于推算的消耗区间不足',insufficient_clean_spans_or_coverage:'有效消耗区间或覆盖率不足'};
+const reasons:Record<string,string>={unverified_account_window_attribution:'账号与额度窗口归属尚未核实',unknown_bucket_model_mapping:'缺少模型与额度窗口的映射',missing_verified_allowance_weights:'缺少已验证的模型额度权重',no_observations:'尚未采到额度数据',insufficient_clean_spans:'可用于推算的消耗区间不足',insufficient_clean_spans_or_coverage:'有效消耗区间或覆盖率不足'};
 const issues:Record<string,[string,string]>={
  inconsistent_token_components:['Token 拆分不一致','保留总量；不对不一致的拆分计价。'],inherited_legacy_skipped:['已排除继承记录','去重处理，不代表新增数据丢失。'],legacy_initial_baseline_gap:['旧记录起始基线缺口','首次记录之前的消耗可能无法恢复。'],unrecoverable_usage_gap:['无法恢复的历史用量','现有日志不足，不能凭空补齐。'],unresolved_fork_history:['分叉历史无法确认','无法确认的继承部分未重复计入。'],malformed_line:['日志行格式损坏','该行未入账；其他完整记录继续处理。'],oversized_line_skipped:['日志行超过读取上限','该行已跳过，保留偏移用于排查。'],missing_timestamp:['记录缺少时间','无法按日期归属的记录需要核对。'],invalid_usage_record:['用量字段无效','该记录未作为有效用量入账。']};
 export const errorMessages:Record<string,string>={
@@ -82,6 +82,7 @@ export function format(value:any,options:DisplayOptions={}):string {
   for(const c of cs){
    const e=c.empirical;
    if(e?.estimated_tokens!=null){
+    add('实验经验外推；严格估算不可用：'+(reasons[c.strict_reason??c.reason]??'账号与额度窗口归属尚未核实'),33);
     if(brief){add(`Plan 100% · ${safe(c.limit_id)}：约 ${num(e.estimated_tokens)} Token（观测组合外推）`,1);add(`样本消耗 ${exact(e.percent_points)} 个百分点；假设模型组合不变且无未记录消耗。`,2);continue;}
     section(`${safe(c.limit_id)} · 观测组合外推`);pair('Plan 100% 等效 Token','约 '+num(e.estimated_tokens),1);pair('样本额度消耗',exact(e.percent_points)+' 个百分点');pair('匹配时段 Token',num(e.matched_tokens));pair('观测开始',stamp(e.observed_from));pair('观测结束',stamp(e.observed_to));pair('API 等效已知部分',money(e.estimated_api_known_usd));pair('Token 计价覆盖率',percent(e.api_token_coverage));add('按观测模型、速度与缓存组合外推，并非官方 Token 上限；假设无未记录的账户消耗。',2);
     if(e.flags.includes('sampling_gap'))add('观测中存在超过 30 分钟的采样空档。',33);
@@ -89,7 +90,7 @@ export function format(value:any,options:DisplayOptions={}):string {
     if(!details)continue;
    }
    const experimental=c.basis==='experimental_credit_proxy';
-   if(brief){add(`套餐总容量 · ${safe(c.limit_id)}：${c.estimated_capacity==null?'暂不可推算，'+(reasons[c.reason]??'证据不足'):`约 ${num(c.estimated_capacity)} 加权额度单位`}`,c.estimated_capacity==null?33:undefined);if(experimental)add('实验性 credits 代理估计，不是官方容量。',33);continue;}
+   if(brief){add(`套餐总容量 · ${safe(c.limit_id)}：${c.estimated_capacity==null?'—':`约 ${num(c.estimated_capacity)} 加权额度单位`}`,c.estimated_capacity==null?33:undefined);if(c.estimated_capacity==null)add(reasons[c.reason]??'证据不足',33);if(experimental)add('实验性 credits 代理估计，不是官方容量。',33);continue;}
    section(`${safe(c.limit_id)} · ${windowName(c.window_duration_mins)}`);
    if(c.estimated_capacity==null){add('暂不可推算',33);add(reasons[c.reason]??'证据不足');}
    else{pair('容量估计',num(c.estimated_capacity)+' 加权额度单位');pair('估计范围',num(c.lower_bound)+' ～ '+num(c.upper_bound));pair('可信程度',({HIGH:'较高',MEDIUM:'中等',LOW:'较低'} as any)[c.confidence]??'未知');add('范围反映取整误差及观测差异，不是 95% 置信区间。',2);}
@@ -124,9 +125,12 @@ export function format(value:any,options:DisplayOptions={}):string {
  }
  function dailyTable(v:any){
   section('逐日用量 · 模型明细');
-  const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','Plan 消耗','100% 等效 Token','API 等效金额','计价覆盖率'];
+  const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','Plan 消耗','100% 等效 Token','API 等效已知小计','计价覆盖率'];
   const table:{cells:string[];bold:boolean}[]=[];
   const dayLabel=(d:string)=>d.slice(5).replace('-','/');
+  if(v.legacy_reconciliation?.pending_tokens)add('待核对的分叉 Token：'+num(v.legacy_reconciliation.pending_tokens)+'；未计入确认用量。',33);
+  if(v.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(v.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
+  if(v.totals?.source_unavailable_tokens)add('保留的缺源历史 Token：'+num(v.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);
   const planCells=(plans:any[])=>plans.length===1?[plans[0].percent_points==null?'—':exact(plans[0].percent_points)+'%'+(plans[0].partial?'*':''),plans[0].estimated_tokens==null?'—':'约 '+num(plans[0].estimated_tokens)]:['—','—'];
   const record=(date:string,label:string,t:any,priced:any,plans:any[]=[],bold=false)=>{
    const has=t?.records>0,pc=planCells(plans);
@@ -154,12 +158,13 @@ export function format(value:any,options:DisplayOptions={}):string {
    print(headers,true);add(widths.map(w=>'─'.repeat(w)).join('┼'),2);
    for(const [i,r] of table.entries()){if(i&&r.bold)add(widths.map(w=>'─'.repeat(w)).join('┼'),2);print(r.cells,r.bold);}
   }
+  if(v.daily_basis?.strict_reason)add('严格容量估算不可用：账号与额度窗口归属尚未核实。'+(v.daily_basis.experimental_empirical?'以下容量为显式实验经验外推。':''),33);
   add();add('— 表示无记录、不可估计或未做模型额度归因，不代表 0。',2);
   add('* Plan 仅统计已观测时段；Token 列是全日/至今用量，反推只使用匹配时段的 Token。',2);
   add('API 金额为按当前价格重估的已知小计，并非订阅账单；模型行不可与合计再次相加。',2);
   add('100% 等效 Token 是经验外推，并非官方上限；假设模型/速度/缓存组合不变且无未记录消耗。',2);
   if(v.plan_cycles.length>1)add('存在多个额度窗口或重置周期，分别列示；不同周期的百分比不合并。',33);
-  const reasons:Record<string,string>={conflicting_snapshots:'同一时刻额度快照冲突',no_observations:'缺少成对观测',small_percent_change:'变化不足 5 个百分点',percent_decrease:'区间内百分比回退',external_usage_suspected:'存在疑似外部消耗',inconsistent_tokens:'Token 数据不一致',saturated:'额度已达 100%，观测受上限影响',no_matched_tokens:'没有匹配的本地 Token'};
+  const reasons:Record<string,string>={unverified_account_window_attribution:'账号与额度窗口归属尚未核实',conflicting_snapshots:'同一时刻额度快照冲突',no_observations:'缺少成对观测',small_percent_change:'变化不足 5 个百分点',percent_decrease:'区间内百分比回退',external_usage_suspected:'存在疑似外部消耗',inconsistent_tokens:'Token 数据不一致',saturated:'额度已达 100%，观测受上限影响',no_matched_tokens:'没有匹配的本地 Token'};
   const emptyDays=v.daily.filter((d:any)=>!d.plans.length).map((d:any)=>dayLabel(d.date));
   if(emptyDays.length)add('无官方成对快照的日期不估算 Plan 消耗或容量。',2);
   for(const day of v.daily){for(const [i,p] of day.plans.entries()){
@@ -173,6 +178,9 @@ export function format(value:any,options:DisplayOptions={}):string {
  if(command==='status'){
   title('Codex 用量账本 · '+safe(({pro:'Pro',plus:'Plus',free:'Free',business:'Business',enterprise:'Enterprise'} as any)[value.account?.plan]??value.account?.plan??'套餐未知'));
   quotas(value.quota??[]);section('今日用量');tokens(value.today?.totals);valuation(value.today?.current_price_valuation,value.today?.totals);
+  if(value.legacy_reconciliation?.pending_tokens)add('待核对的分叉 Token：'+num(value.legacy_reconciliation.pending_tokens)+'；未计入确认用量。',33);
+  if(value.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(value.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
+  if(value.today?.totals?.source_unavailable_tokens)add('今日含缺源历史 Token：'+num(value.today.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);
   section('采集状态');monitor(value.monitor,value.last_sync);add();capacity(value.capacity??[],true);quality(value.issues??[]);
   if(details){section('账户总量核对');pair('本地累计 Token',num(value.account_cross_check?.local_tokens));pair('官方累计 Token',num(value.account_cross_check?.official_lifetime_tokens));pair('本地减官方',num(value.account_cross_check?.difference));pair('官方汇总采集时间',stamp(value.account_cross_check?.official_observed_at));add('范围、保留期限和上报延迟不同，差额不能直接当作外部消耗。',2);modelTable(value.today);quality(value.issues??[],true);}
   else{add();add('更多明细：cux status --details',2);}

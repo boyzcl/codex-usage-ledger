@@ -1,0 +1,28 @@
+// Persistent synthetic backup/repair/repeat/rollback evidence; never uses personal paths.
+import assert from 'node:assert/strict';
+import {mkdirSync,writeFileSync,existsSync} from 'node:fs';
+import {join,resolve} from 'node:path';
+import {Ledger} from '../dist/src/store.js';
+import {initialState,parseLine} from '../dist/src/parser.js';
+import {repairPreview,consistentBackup} from '../dist/src/repair.js';
+const root=resolve(process.argv[2]??'');if(process.argv.length!==3||existsSync(root))throw Error('pass_new_output_directory');mkdirSync(root,{recursive:true,mode:0o700});
+const home=join(root,'source');mkdirSync(join(home,'sessions'),{recursive:true});
+const timestamp='2026-10-03T10:00:00.000Z',line=(type,payload)=>JSON.stringify({timestamp,type,payload});
+const meta=(id,parent)=>line('session_meta',{id,timestamp:'2026-10-03T00:00:00Z',forked_from_id:parent});
+const usage=(id,n)=>line('token_usage_record',{response_id:id,usage:{input_tokens:n,output_tokens:0,total_tokens:n}});
+const count=(input,output,totalInput=input,totalOutput=output)=>line('event_msg',{type:'token_count',info:{last_token_usage:{input_tokens:input,output_tokens:output,total_tokens:input+output},total_token_usage:{input_tokens:totalInput,output_tokens:totalOutput,total_tokens:totalInput+totalOutput}}});
+const rows=ls=>{const state=initialState();return ls.flatMap(l=>parseLine(l,state).usage);};
+const parent=[meta('parent'),count(100,20)],child=[meta('child','parent'),count(100,20),count(2,1,102,21)];
+const exact=[meta('exact'),line('event_msg',{type:'thread_settings_applied',thread_id:'exact',thread_settings:{model:'new'}}),usage('same-id',100)];
+const dbPath=join(root,'old.db'),db=new Ledger(dbPath);
+const oldRows=[...rows(parent),...rows(child),{...rows(exact)[0],model:'old',service_tier:'fast',reasoning_effort:'high'},...rows([meta('missing'),usage('missing-source',99)])];
+for(const row of oldRows)db.insertUsage(row);db.close();
+for(const [name,ls] of [['parent',parent],['child',child],['exact',exact]])writeFileSync(join(home,'sessions','rollout-'+name+'.jsonl'),ls.join('\n')+'\n');
+const first=await repairPreview(dbPath,home,join(root,'preview'),'UTC');
+assert.equal(first.before.tokens,442);assert.equal(first.after.tokens,322);assert.equal(first.changed_attribution_records,1);assert.equal(first.excluded_records,1);assert.equal(first.retained_source_unavailable_records,1);
+const second=await repairPreview(first.files.repaired,home,join(root,'repeat'),'UTC');assert.equal(second.changed_attribution_records,0);assert.equal(second.excluded_records,0);assert.equal(second.new_records,0);
+const restoredPath=join(root,'rollback.db');await consistentBackup(first.files.baseline,restoredPath);
+const restored=new Ledger(restoredPath);assert.deepEqual(restored.records(),oldRows);restored.close();
+const original=new Ledger(dbPath);assert.deepEqual(original.records(),oldRows);original.close();
+const result={synthetic_only:true,first,repeat:second,rollback:{path:restoredPath,records_equal_to_original:true,original_unchanged:true},checks:'All assertions passed'};
+writeFileSync(join(root,'exercise.json'),JSON.stringify(result,null,2)+'\n',{mode:0o600});console.log(JSON.stringify({before_tokens:442,after_tokens:322,same_id_corrected:1,inherited_removed:1,missing_retained:1,repeat_changes:0,rollback_equal:true,evidence:join(root,'exercise.json')},null,2));

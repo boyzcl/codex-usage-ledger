@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {dailyReport,empiricalPlans,combinePlans} from '../src/daily.js';
+import {dailyReport as rawDailyReport,empiricalPlans,combinePlans} from '../src/daily.js';
 import {period,report} from '../src/report.js';
 import {format,cellWidth} from '../src/display.js';
 import {initialState,parseLine} from '../src/parser.js';
 import type {Usage,Quota,PriceRule} from '../src/types.js';
+const dailyReport:typeof rawDailyReport=(rows,quotas,rules,range,at)=>rawDailyReport(rows,quotas,rules,range,at,{experimentalEmpirical:true});
 const at='2026-10-04T10:00:00.000Z';
 const range=period('report','Asia/Shanghai','2026-10-01','2026-10-03',at);
 function use(timestamp:string,tokens:number,model='a',cached=0):Usage{

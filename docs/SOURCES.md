@@ -35,3 +35,9 @@
 4. 多个 pairwise 候选并不等于多个独立样本。V0 使用不重叠 span，避免虚增置信度。
 5. quantization/observed range 不是有统计覆盖保证的 95% 区间。
 6. 插件钩子需单独授信；为保持原 `~/.codex` 只读，本轮只交付插件包，不注册或修改用户 hooks。
+
+## 第一轮设置语义核验
+
+2026-10-04 核验内置 CLI `0.160.0`，并读取对应 tag [`rust-v0.160.0` 的 protocol.rs](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/protocol/src/protocol.rs)（Git blob `abc4e90847636bfe51e6275ede528a13616c8573`）。`ThreadSettingsAppliedEvent.thread_settings` 是 `ThreadSettingsSnapshot`；`service_tier` 和 `reasoning_effort` 的 `Option` 字段以 `skip_serializing_if = "Option::is_none"` 序列化。省略表示此完整快照没有该设置，不能保留上次 Fast/high，也不能补成 Standard。`ThreadSettingsOverrides` / `TurnSettingsUpdate` 则明确为局部更新；模型 reroute 沿用局部字段语义。本轮不据最新主干字段推断旧版本的官方可用状态。
+
+同一 tag 的 `SessionMeta.forked_from_ordinal_exclusive` 注释明确说明它是逻辑父线程的继承 exclusive ordinal，与物理 `history_base` 独立；revert 可替换物理历史而保留此边界。本轮仅投影该边界字段，不投影相邻的账号或用户标识，用于排除父线程分叉之后的偶然相等计数。

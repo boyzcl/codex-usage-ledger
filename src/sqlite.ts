@@ -14,3 +14,5 @@ try {
 }finally{process.emitWarning=original;}
 export const DatabaseSync=sqlite.DatabaseSync;
 export type DatabaseSync=import('node:sqlite').DatabaseSync;
+
+export const backup=sqlite.backup;

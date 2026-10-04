@@ -1,7 +1,7 @@
 import {hash,normalizeQuota} from './quota.js';
 import {tokenFields,type Tokens,type Usage,type ParseState,type ParseOutput,type Context} from './types.js';
 import {projectJson,relevantLine} from './privacy.js';
-export function initialState():ParseState{return {thread_id:'unknown',session_id:'unknown',parent_thread_id:null,created_at:null,turn_id:null,root_turn_id:null,previous:null,exact_turns:[],contexts:{},legacy_index:0,has_exact:false,replay_done:false,replay_next_index:null,model:'unknown',model_source:'unknown',service_tier:'unknown',reasoning_effort:null,project:null};}
+export function initialState():ParseState{return {thread_id:'unknown',session_id:'unknown',parent_thread_id:null,fork_ordinal_exclusive:null,created_at:null,turn_id:null,root_turn_id:null,previous:null,exact_turns:[],contexts:{},legacy_index:0,has_exact:false,replay_done:false,replay_next_index:null,model:'unknown',model_source:'unknown',service_tier:'unknown',reasoning_effort:null,project:null};}
 export function tokens(raw:any):Tokens|null {
  if(!raw||typeof raw.input_tokens!=='number'||typeof raw.output_tokens!=='number')return null;
  const t=Object.fromEntries(tokenFields.map(k=>[k,raw[k]??0])) as Tokens;
@@ -24,6 +24,7 @@ export function parseLine(line:string,s:ParseState):ParseOutput {
  if(typ==='session_meta'){
   s.thread_id=p.id??s.thread_id;s.session_id=p.session_id??p.id??s.session_id;s.created_at=p.timestamp??stamp;
   s.parent_thread_id=p.forked_from_id??p.source?.subagent?.thread_spawn?.parent_thread_id??p.source?.subagent?.fork?.parent_thread_id??null;
+  s.fork_ordinal_exclusive=Number.isSafeInteger(p.forked_from_ordinal_exclusive)&&p.forked_from_ordinal_exclusive>=0?p.forked_from_ordinal_exclusive:null;
   if(typeof p.cwd==='string')s.project=p.cwd;return out;
  }
  if(typ==='task_started'){s.turn_id=p.turn_id??null;s.root_turn_id=p.root_turn_id??null;return out;}
@@ -34,6 +35,8 @@ export function parseLine(line:string,s:ParseState):ParseOutput {
  if(typ==='thread_settings_applied'){
   // Copied settings retain their owner. Never let parent's settings overwrite child settings.
   if(p.thread_id&&p.thread_id!==s.thread_id)return out;
+  // This event carries the complete persisted settings, unlike reroute patches.
+  s.model='unknown';s.model_source='unknown';s.service_tier='unknown';s.reasoning_effort=null;
   applyContext(s,p.thread_settings??{},'thread_settings_applied');if(s.turn_id)s.contexts[s.turn_id]=context(s);return out;
  }
  if(typ==='model_rerouted'||typ==='model/rerouted'){applyContext(s,{...p,model:p.to_model??p.model},'model_rerouted');if(s.turn_id)s.contexts[s.turn_id]=context(s);return out;}
@@ -44,7 +47,7 @@ export function parseLine(line:string,s:ParseState):ParseOutput {
   const inherited=owner!==s.thread_id||(!!s.created_at&&Date.parse(stamp!)<Date.parse(s.created_at));
   const inconsistent=t.cached_input_tokens+t.cache_write_input_tokens>t.input_tokens||t.reasoning_output_tokens>t.output_tokens||t.total_tokens!==t.input_tokens+t.output_tokens;
   if(inconsistent)issue('inconsistent_token_components');
-  return {...t,id:identity,response_id:payload.response_id??null,session_id:payload.session_id??s.session_id,thread_id:owner,turn_id:turn,root_turn_id:payload.root_turn_id??s.root_turn_id,timestamp:stamp!,model:payload.model??c.model,model_source:payload.model?'response':c.model_source,reasoning_effort:payload.reasoning_effort??c.reasoning_effort,service_tier:payload.service_tier??c.service_tier,project:c.project,uncached_input_tokens:Math.max(t.input_tokens-t.cached_input_tokens-t.cache_write_input_tokens,0),source,attribution_quality:payload.model?'explicit':c.model==='unknown'?'unknown':owner===s.thread_id?'context':'inherited',data_quality:inconsistent?'inconsistent':source==='token_usage_record'?'provider_reported':source==='compaction_recovered'?'recovered_timestamp':'legacy_estimated',inherited,parent_thread_id:s.parent_thread_id,fingerprint:null,ordinal:e.ordinal??null,api_equivalent_usd:null,credit_equivalent:null,allowance_weight:null,api_rule_id:null,credit_rule_id:null,allowance_rule_id:null};
+  return {...t,id:identity,response_id:payload.response_id??null,session_id:payload.session_id??s.session_id,thread_id:owner,turn_id:turn,root_turn_id:payload.root_turn_id??s.root_turn_id,timestamp:stamp!,model:payload.model??c.model,model_source:payload.model?'response':c.model_source,reasoning_effort:payload.reasoning_effort??c.reasoning_effort,service_tier:payload.service_tier??c.service_tier,project:c.project,uncached_input_tokens:Math.max(t.input_tokens-t.cached_input_tokens-t.cache_write_input_tokens,0),source,attribution_quality:payload.model?'explicit':c.model==='unknown'?'unknown':owner===s.thread_id?'context':'inherited',data_quality:inconsistent?'inconsistent':source==='token_usage_record'?'provider_reported':source==='compaction_recovered'?'recovered_timestamp':'legacy_estimated',inherited,parent_thread_id:s.parent_thread_id,fork_ordinal_exclusive:s.fork_ordinal_exclusive,fingerprint:null,ordinal:e.ordinal??null,api_equivalent_usd:null,credit_equivalent:null,allowance_weight:null,api_rule_id:null,credit_rule_id:null,allowance_rule_id:null};
  }
  if(typ==='token_usage_record'){
   const t=tokens(p.usage);if(!t||!p.response_id){issue('invalid_usage_record');return out;}

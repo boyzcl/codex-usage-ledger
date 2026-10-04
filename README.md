@@ -69,7 +69,7 @@ macOS 在线采集使用独立 `CODEX_HOME` 和 `sandbox-exec`。认证交给官
 - 新格式使用 `token_usage_record`，按全局 `response_id` 去重。源记录被复制到子代理或移入归档时，不重复计入。
 - 对应 turn 已出现新格式记录时，移除同 turn 的旧格式暂存记录。旧 turn 仍保留，支持历史会话升级。
 - 旧格式优先使用变化计数对应的 `last_token_usage`；缺失时使用累计增量。累计回退与缓存分类回退分别处理。
-- 父子会话的旧格式重放按父事件指纹匹配；无法确认的继承部分标记缺口。此算法不能恢复所有历史缺失记录。
+- 父子会话的旧格式重放按连续父事件指纹匹配。父记录未到或无法建立起始对应关系时，候选事实保存在 `legacy_candidates`，不计入确认用量；父数据变化后重新核对。明确分叉之后的偶然相等不再作为继承证据。日志提供 `forked_from_ordinal_exclusive` 时，只匹配父线程在该边界之前的 ordinal，父线程后续相等计数不能被当作继承。老日志没有边界时仍依赖连续指纹证据，不能证明全部历史归属。此算法不能恢复所有历史缺失记录。
 - compaction 的嵌入 `latest_token_usage_record` 只有在 ID 与 `compaction_response_id` 一致时才补记，否则不能当作新请求。
 - `input` 包含 cached 和 cache write。`uncached = max(input - cached - write, 0)`。
 - `reasoning` 属于 output，不再次加入 total 或计费。
@@ -77,7 +77,11 @@ macOS 在线采集使用独立 `CODEX_HOME` 和 `sandbox-exec`。认证交给官
 - 模型和速度按 turn/context/settings 事件归因。没有速度记录时保持 `unknown`，不默认 Standard。
 - 数字不一致、损坏行、过大行、不可恢复 compaction 均留下问题代码，不保存坏行正文。
 
-增量检查点以字节偏移、设备、inode、大小和修改时间识别追加与替换。检查点和该文件的账本变更原子提交；不完整的末行等待下次补全。检测到文件重写会重新读入，保留已入账的事实记录。最终去重依赖记录身份，不依赖路径。
+增量检查点保存完整已消费字节前缀的 SHA-256 摘要和解析器版本。变化文件先校验整个前缀，再决定是否追加；不依赖头尾抽查。设备、inode、大小、修改时间和 ctime 用于发现变化，恢复 mtime 不能隐藏同大小改写。检查点和该文件的账本变更原子提交；不完整的末行等待下次补全。读取前后完整摘要及文件状态不一致时整文件事务回滚，留待下一次同步；`validation_bytes_read` 和 `validation_ms` 记录校验开销。检测到文件重写会重新读入，保留已入账的事实记录。最终去重依赖记录身份，不依赖路径。
+
+完整 `thread_settings_applied` 快照省略或清空速度/推理字段时清除旧状态，速度保持 `unknown`；局部模型 reroute 只更新提供的字段。
+
+旧账本不能只依靠更新后再次同步纠正：使用 [隔离修复说明](docs/REPAIR.md) 生成一致性备份、修复副本和差异，再验收。修复不覆盖输入数据库。
 
 ## 金额
 
@@ -96,11 +100,13 @@ macOS 在线采集使用独立 `CODEX_HOME` 和 `sandbox-exec`。认证交给官
 
 额度事实来自官方百分比；窗口按 `limit_id + duration + reset + slot` 分开，不硬编码 5 小时或周额度。
 
-经验估算独立于严格权重估计：仅使用 `app_server` 同窗口、同重置时间的成对快照，以 `(首快照,末快照]` 内的本地 Token 除以百分点变化并乘以 100。变化至少 5 个百分点才输出，标记局部观测及超过 30 分钟的采样空档；百分比回退、冲突、饱和、疑似外部消耗或 Token 不一致时不输出。该结果假设观测模型、速度及缓存组合不变且没有未记录消耗，不是官方固定 Token 上限。
+当前尚未验证账号和额度窗口归属，默认 `status`、`estimate` 和逐日报表的容量保持未知（表格显示 `—`），严格估算缺失原因仍保留。此前展示的经验值不属于已验证套餐容量。只有显式加 `--experimental-empirical` 才展示实验结果，例如 `cux report --from 2026-10-01 --to 2026-10-03 --experimental-empirical`。
 
-逐日表按配置时区分组，不插值午夜快照。同周期区间估算使用逐日匹配 Token 与百分点的总和；跨午夜的观测空档不纳入。`estimate` 和 `status` 的经验值使用当前周期连续观测，因此与逐日表可能略有差异。不同窗口、不同 reset 值分别保留；即使只差一秒也不擅自合并。原始快照不修改。
+实验经验估算独立于严格权重估计：仅使用 `app_server` 同窗口、同重置时间的成对快照，以 `(首快照,末快照]` 内的本地 Token 除以百分点变化并乘以 100。变化至少 5 个百分点才输出，标记局部观测及超过 30 分钟的采样空档；百分比回退（包括跨日单点）、冲突、饱和、疑似外部消耗或 Token 不一致时不输出。该结果假设观测模型、速度及缓存组合不变且没有未记录消耗，不是官方固定 Token 上限。
 
-报表 JSON 新增 `daily`、`plan_cycles`、`daily_basis`、`display_period` 及模型的当前价格重估；原 `totals` 与历史金额字段保留。`estimate --json` 在原估计项中增加 `empirical`。经验值按查询时的事实重算，不写入原严格估计表；需保存时导出报表 JSON。
+逐日表按配置时区分组，不插值午夜快照。同周期区间估算使用逐日匹配 Token 与百分点的总和；跨午夜的观测空档不纳入。显式实验模式下，`estimate` 和 `status` 的经验值使用当前周期连续观测，因此与逐日表可能略有差异。不同窗口、不同 reset 值分别保留；即使只差一秒也不擅自合并。原始快照不修改。
+
+报表 JSON 新增 `daily`、`plan_cycles`、`daily_basis`、`display_period` 及模型的当前价格重估；原 `totals` 与历史金额字段保留。`estimate --experimental-empirical --json` 在原估计项中增加 `empirical`；默认该字段为 `null`，`strict_reason` 始终保留。经验值按查询时的事实重算，不写入原严格估计表；需保存时导出报表 JSON。
 
 官方说明 credit 费率不能直接决定套餐内额度消耗，且模型与额度 bucket 的公开映射不完整。因此默认配置不填入额度权重或猜测映射。目前结果可能是 `missing_verified_allowance_weights` 或 `unknown_bucket_model_mapping`。
 

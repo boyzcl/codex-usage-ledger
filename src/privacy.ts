@@ -6,7 +6,7 @@ const record:Shape={thread_id:true,turn_id:true,session_id:true,root_turn_id:tru
 const window:Shape={used_percent:true,window_minutes:true,resets_at:true};
 const quota:Shape={limit_id:true,limit_name:true,primary:window,secondary:window,credits:{has_credits:true,unlimited:true,balance:true},plan_type:true};
 const settings:Shape={model:true,service_tier:true,reasoning_effort:true,cwd:true,model_provider_id:true};
-const payload:Shape={...record,id:true,timestamp:true,type:true,cwd:true,effort:true,cli_version:true,forked_from_id:true,
+const payload:Shape={...record,id:true,timestamp:true,type:true,cwd:true,effort:true,cli_version:true,forked_from_id:true,forked_from_ordinal_exclusive:true,
  source:{subagent:{thread_spawn:{parent_thread_id:true},fork:{parent_thread_id:true}}},
  thread_settings:settings, info:{total_token_usage:tokens,last_token_usage:tokens},rate_limits:quota,
  compaction_response_id:true,latest_token_usage_record:record,to_model:true,from_model:true};
