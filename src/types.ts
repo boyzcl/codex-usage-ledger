@@ -1,7 +1,9 @@
+import type {QuotaScope,QuotaContext} from './quota-policy.js';
 export const tokenFields = ['input_tokens','cached_input_tokens','cache_write_input_tokens','output_tokens','reasoning_output_tokens','total_tokens'] as const;
 export type TokenField = typeof tokenFields[number];
 export type Tokens = Record<TokenField, number>;
 export interface Usage extends Tokens {
+ quota_attribution?:{scope:QuotaScope;limit_id:string;slot:string;window_duration_mins:number;resets_at:number;source:'source_event'};
  origin_thread_id?:string;origin_source?:string;
  repair_status?:'source_unavailable';fork_ordinal_exclusive?:number|null;
  id:string; response_id:string|null; session_id:string; thread_id:string; turn_id:string|null; root_turn_id:string|null;
@@ -12,6 +14,7 @@ export interface Usage extends Tokens {
  api_rule_id:string|null; credit_rule_id:string|null; allowance_rule_id:string|null;
 }
 export interface Quota {
+ context?:QuotaContext;
  id:string; timestamp:string; limit_id:string; slot:string; window_duration_mins:number|null;
  resets_at:number|null; used_percent:number; source:string; raw_json:string;
 }

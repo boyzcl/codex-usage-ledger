@@ -1,3 +1,4 @@
+import {redactIdentity,officialSnapshot} from './quota-policy.js';
 import {capacityView} from './capacity-policy.js';
 import {createWriteStream,existsSync,unlinkSync} from 'node:fs';
 import {once} from 'node:events';
@@ -18,16 +19,18 @@ export async function exportData(db:Ledger,kind:string,range:{from:string;to_exc
  try{
   if(path){await once(stream,'open');created=true;}
   db.db.exec('BEGIN');
-  await write({type:'metadata',schema_version:2,kind,exported_at:new Date().toISOString(),range:undated?null:range,notes:kind==='usage'?'Normalized source counters and stored derived amounts; project paths omitted. Original conversation text is never included.':kind==='estimates'?'Unverified capacity view. Preserved raw revisions are available via estimate-history.':null});
+  await write({type:'metadata',schema_version:3,kind,exported_at:new Date().toISOString(),range:undated?null:range,notes:kind==='usage'?'Normalized source counters and stored derived amounts; project paths omitted. Original conversation text is never included.':kind==='estimates'?'Unverified capacity view. Preserved raw revisions are available via estimate-history.':null});
   for(const row of db.db.prepare(sql).iterate(...(undated?[]:[range.from,range.to_exclusive]))){
    let data:any=row;
    if(kind==='usage'){data=JSON.parse(row.raw_json as string);delete data.project;}
+   else if(kind==='quota')data=db.quotaOutput(row as any);
    else if(kind==='conflicts'){const state=db.db.prepare('SELECT * FROM usage_conflict_state WHERE id=?').get(row.id);data={...row,raw:JSON.parse(row.raw_json as string),raw_json:undefined,dispute_status:state?.status??'open',confirmed:false,quantity:null};delete data.raw.project;}
    else if(kind==='estimates')data={...row,raw:capacityView(JSON.parse(row.raw_json as string)),raw_json:undefined};
    else if(kind==='estimate-history')data={...row,raw:JSON.parse(row.raw_json as string),raw_json:undefined,status:'historical_unverified',history_status:row.status,confirmed:false,limitations:['Original derived values preserved for audit; not verified capacity.']};
    else if(kind==='prices')data=JSON.parse(row.raw_json as string);
    else if(row.raw_json)data={...row,raw:JSON.parse(row.raw_json as string),raw_json:undefined};
-   await write({type:kind,data});count++;
+   if(kind==='observations'&&row.source==='app_server'&&row.kind==='account/rateLimits/read'&&row.status==='ok'){data.official_snapshot=officialSnapshot(JSON.parse(row.raw_json as string).response,row.timestamp as string);data.official_snapshot.evidence.observation_ids=[row.id];}
+   await write({type:kind,data:redactIdentity(data)});count++;
   }
   db.db.exec('COMMIT');
   if(path){stream.end();await finished(stream);}

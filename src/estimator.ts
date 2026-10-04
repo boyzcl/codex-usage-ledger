@@ -1,3 +1,5 @@
+import {quotaCycleKey,quotaContext,attributedTo,allocationReason} from './quota-policy.js';
+import {workloadRanges} from './workload.js';
 import type {Quota,Usage,PriceRule,Config} from './types.js';
 import {mode,priceUsage} from './pricing.js';
 export interface Point {timestamp:string;percent:number;units:number;raw_tokens:number;unknown:number;records:number;source:string;}
@@ -37,14 +39,15 @@ export function estimatePoints(points:Point[]){
 function empty(reason:string){return {status:'insufficient_data',reason,estimated_capacity:null,lower_bound:null,upper_bound:null,interval_kind:'rounding_and_observed_dispersion_not_95_percent_ci',clean_span_count:0,observed_percent_span:0,missing_clean_spans:3,missing_percent_span:10,coverage_ratio:0,confidence:'LOW',residual:null,external_usage_detected:false,spans:[] as Span[]};}
 export function quotaEstimates(quotas:Quota[],usage:Usage[],config:Config,rules:PriceRule[],now=new Date().toISOString()){
  const groups=new Map<string,Quota[]>();
- for(const q of quotas){if(q.resets_at===null||q.window_duration_mins===null)continue;const key=JSON.stringify([q.limit_id,q.window_duration_mins,q.resets_at,q.slot]);if(!groups.has(key))groups.set(key,[]);groups.get(key)!.push(q);}
+ for(const q of quotas){if(q.timestamp>now||q.resets_at===null||q.window_duration_mins===null)continue;const key=quotaCycleKey(q);if(!groups.has(key))groups.set(key,[]);groups.get(key)!.push(q);}
  const out:any[]=[];
  for(const [key,qs] of groups){
   const q=qs[0];const models=config.estimator.bucket_models[q.limit_id];const experimental=config.estimator.weight_basis==='credit_proxy';
   const sorted=[...qs].sort((a,b)=>a.timestamp.localeCompare(b.timestamp)||(a.source==='rollout'?-1:1));
   const observations=sorted.filter((x,i)=>i===0||x.timestamp!==sorted[i-1].timestamp);
   const from=new Date((q.resets_at!-q.window_duration_mins!*60)*1000).toISOString();
-  const relevant=usage.filter(x=>x.timestamp>=from&&x.timestamp<=observations.at(-1)!.timestamp);
+  const allocated=usage.filter(x=>attributedTo(x,q));
+  const relevant=allocated.filter(x=>x.timestamp>=from&&x.timestamp<=observations.at(-1)!.timestamp).sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
   const weighted=relevant.map(u=>({u,units:experimental?proxyWeight(u):u.allowance_weight}));
   let cursor=0,units=0,raw=0,unknown=0;const points:Point[]=[];
   for(const ob of observations){while(cursor<weighted.length&&weighted[cursor].u.timestamp<=ob.timestamp){const r=weighted[cursor++];raw+=r.u.total_tokens;if(!models?.includes(r.u.model)||r.units===null||r.u.source!=='token_usage_record'||r.u.data_quality==='inconsistent')unknown++;else units+=r.units;}
@@ -52,19 +55,22 @@ export function quotaEstimates(quotas:Quota[],usage:Usage[],config:Config,rules:
   let result=estimatePoints(points);
   if(!models)result={...result,...empty('unknown_bucket_model_mapping'),spans:result.spans,external_usage_detected:result.external_usage_detected};
   else if(!experimental&&!weighted.some(x=>x.units!==null))result={...result,...empty('missing_verified_allowance_weights'),spans:result.spans,external_usage_detected:result.external_usage_detected};
+  const prerequisites=result.reason?[result.reason]:[];
+  const attribution=allocationReason(q,usage.filter(r=>r.timestamp>observations[0].timestamp&&r.timestamp<=observations.at(-1)!.timestamp));
+  if(attribution)result={...result,...empty(attribution),spans:[],external_usage_detected:false};
   const cap=result.estimated_capacity;
   const mixes:Record<string,unknown>={};
-  if(cap!==null){for(const [name,start] of [['last_7_days',new Date(Date.parse(now)-7*864e5).toISOString()],['last_30_days',new Date(Date.parse(now)-30*864e5).toISOString()],['cycle',from]]){
-   const mix=usage.filter(x=>x.timestamp>=start&&x.timestamp<=now&&models?.includes(x.model));let amount=0,total=0,money=0,complete=true;
+  if(cap!==null){for(const range of workloadRanges([q],now,config.timezone).ranges){const name=range.name===key?'cycle':range.name,start=range.from;
+   const mix=allocated.filter(x=>x.timestamp>=start&&x.timestamp<range.to_exclusive&&models?.includes(x.model));let amount=0,total=0,money=0,complete=true;
    for(const r of mix){const w=experimental?proxyWeight(r):r.allowance_weight;if(w===null||r.api_equivalent_usd===null){complete=false;break;}amount+=w;total+=r.total_tokens;money+=r.api_equivalent_usd;}
    mixes[name]=complete&&amount>0?{equivalent_tokens:cap*total/amount,equivalent_api_usd:cap*money/amount}:null;
   }
   // A single model still needs an explicit token-type mixture; use observed mix with tier Standard.
-  for(const model of models??[]){const mix=usage.filter(x=>x.model===model&&x.timestamp>=new Date(Date.parse(now)-30*864e5).toISOString());let amount=0,total=0,money=0,valid=mix.length>0;
+  for(const model of models??[]){const mix=allocated.filter(x=>x.model===model&&x.timestamp>=new Date(Date.parse(now)-30*864e5).toISOString()&&x.timestamp<=now);let amount=0,total=0,money=0,valid=mix.length>0;
    for(const u of mix){const priced=priceUsage({...u,timestamp:now,service_tier:'default'},rules);const w=experimental?proxyWeight(priced):priced.allowance_weight;if(w===null||priced.api_equivalent_usd===null){valid=false;break;}amount+=w;total+=u.total_tokens;money+=priced.api_equivalent_usd;}
    mixes[model+'_standard_observed_token_type_mix']=valid&&amount>0?{equivalent_tokens:cap*total/amount,equivalent_api_usd:cap*money/amount}:null;
   }}
-  out.push({cycle:key,limit_id:q.limit_id,window_duration_mins:q.window_duration_mins,resets_at:q.resets_at,slot:q.slot,basis:experimental?'experimental_credit_proxy':'verified_allowance',assumption:experimental?'Credit rates proxy included allowance; model mapping is user-supplied, not official.':null,observation_count:observations.length,...result,equivalents:mixes});
+  out.push({as_of:now,scope:quotaContext(q).scope,availability:quotaContext(observations.at(-1)!).availability,attribution_reason:attribution,missing_prerequisites:[...prerequisites,...(attribution?[attribution]:[])],strict_reason:attribution??result.reason??'unverified_account_window_attribution',cycle:key,limit_id:q.limit_id,window_duration_mins:q.window_duration_mins,resets_at:q.resets_at,slot:q.slot,basis:experimental?'experimental_credit_proxy':'verified_allowance',assumption:experimental?'Credit rates proxy included allowance; model mapping is user-supplied, not official.':null,observation_count:observations.length,...result,equivalents:mixes});
  }return out;
 }
 function proxyWeight(u:Usage):number|null{

@@ -45,3 +45,16 @@
 ## 修复运行时边界
 
 官方 Node [`v22.16.0` sqlite.md](https://github.com/nodejs/node/blob/v22.16.0/doc/api/sqlite.md) 将 `sqlite.backup` 标为 `added: v22.16.0`（blob `2c66898bf376c0f09dab60da5622b960f10462a3`）；[`v22.13.0` 的同文件](https://github.com/nodejs/node/blob/v22.13.0/doc/api/sqlite.md) 不含该 API（blob `270b8e8d8b750725942d655d6ba0dfbe9018623f`）。项目保持普通查询/导入的 22.13 下限，修复入口单独检查能力，避免导入模块时让普通命令一并失效。
+
+## 阶段 B：额度身份与官方许可
+
+2026-10-04再次在独立运行目录、只读原Codex home的OS沙箱中生成内置0.160.0的 experimental TS协议。`GetAccountRateLimitsResponse`包含 `accountId`、`ordinaryUsageAllowed`；`RateLimitSnapshot`包含 `spendControlReached`、`individualLimit`。已保存的真实成功响应也具有顶层前两字段，不能仅保留桶投影后以缺字段结案。本文不包含身份值。
+
+公开固定核验点为 [`afb436df8b70bb5bc57b86d9a3e829968988cd21`](https://github.com/openai/codex/tree/afb436df8b70bb5bc57b86d9a3e829968988cd21)：
+
+- [GetAccountRateLimitsResponse.ts](https://github.com/openai/codex/blob/afb436df8b70bb5bc57b86d9a3e829968988cd21/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsResponse.ts)：普通用量许可经活动账号验证；null不可用，不从百分比或重置推断恢复；accountId是该次后台快照关联账号。
+- [RateLimitSnapshot.ts](https://github.com/openai/codex/blob/afb436df8b70bb5bc57b86d9a3e829968988cd21/codex-rs/app-server-protocol/schema/typescript/v2/RateLimitSnapshot.ts)：spendControlReached的null不可用；normalModelSlug用于显示模型及推理选项，不证明计费映射。
+- [rate_limits_identity_tests.rs](https://github.com/openai/codex/blob/afb436df8b70bb5bc57b86d9a3e829968988cd21/codex-rs/app-server/tests/suite/v2/rate_limits_identity_tests.rs)：在途响应遇用户/工作区切换重新验证；该测试不为客户端提供逐调用计费归属。
+- [`rust-v0.160.0` protocol.rs](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/protocol/src/protocol.rs)：SessionMeta.creator_account_id是创建时选定账号，resume不更新；creator_user_id也是创建者身份。不能据此归属后来所有调用。runtime_workspace_roots是本地路径，不能替代计费工作区。
+
+官方文档 [Auth endpoints](https://learn.chatgpt.com/docs/app-server#auth-endpoints) 定义多桶、窗口、百分比和账户查询；与本机协议和原保存结构交叉核对，不假定所有版本都有新字段。原observations恢复投影只接受同来源、同时间且完整匹配的旧额度事实；候选上下文冲突标ambiguous/unknown，并保存源observation引用。

@@ -65,3 +65,13 @@ node --test dist/test/round1.test.js dist/test/repair.test.js
 可保留合成演练的文件证据：`node scripts/exercise-repair.mjs /absolute/path/new-synthetic-exercise`。脚本会生成合成旧库、修复、重复修复、回滚副本和 `exercise.json`，不使用个人路径。
 
 测试包含子先/父先与分批重核、真正分叉后偶然相等、同 inode 中间改写、替换、截断增长、半行、归档、读取中变化、同 ID 纠正、缺源保留、Token 冲突、幂等重复、事务中断和备份回滚。
+
+## v0.4.4 身份及许可投影迁移
+
+打开旧库时新增 `quota_context`，不改原 quota_snapshots、usage_records、金额、价格引用或原observations。一次事务从成功的原 `account/rateLimits/read` observations恢复同时间且额度事实及桶raw完全一致的旧官方行，记录源observation ID及上下文指纹。源缺失保持unknown；候选身份或许可不唯一标mixed/unknown，不选择首个或最后一个，也不把rollout快照改成官方来源。`quota_context_version`使重复打开幂等，原派生快照先保存到历史。
+
+新采集的身份/许可来自同一次官方响应。恢复后的旧ID保持不变；同一已恢复响应再次插入复用旧事实ID。不同身份的新事实ID分开。repair-preview保留/追加context，已有同ID上下文不一致则 `repair_quota_context_conflict`，整个修复事务回滚。
+
+上线前仍需最新一致性备份、原行完整对账与独立预览；不得把旧预览覆盖持续增长的生产库。本迁移新增投影表，紧急代码回退到v0.4.3可以保留新表和原库，避免丢弃上线后新观测；未经核实的投影不参与旧版容量解释。先停服务并备份失败现场，再恢复旧构建；公开撤回用普通revert，不能强推。
+
+旧版可读取原表不等于保留B隔离语义；回退后不应使用旧版显式实验入口解释多身份容量。

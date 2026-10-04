@@ -1,3 +1,4 @@
+import {responseContext} from '../src/quota-policy.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {dailyReport as rawDailyReport,empiricalPlans,combinePlans} from '../src/daily.js';
@@ -6,13 +7,16 @@ import {format,cellWidth} from '../src/display.js';
 import {initialState,parseLine} from '../src/parser.js';
 import type {Usage,Quota,PriceRule} from '../src/types.js';
 const dailyReport:typeof rawDailyReport=(rows,quotas,rules,range,at)=>rawDailyReport(rows,quotas,rules,range,at,{experimentalEmpirical:true});
+const syntheticContext=responseContext({accountId:'synthetic-account'},null,'2026-10-01T00:00:00.000Z','app_server');
+syntheticContext.scope={...syntheticContext.scope,workspace_ref:'synthetic-workspace',billing_source:'synthetic-included',status:'verified'};
+const syntheticAttribution={scope:syntheticContext.scope,limit_id:'codex',slot:'primary',window_duration_mins:10080,resets_at:Date.parse('2026-10-07T00:00:00Z')/1000,source:'source_event' as const};
 const at='2026-10-04T10:00:00.000Z';
 const range=period('report','Asia/Shanghai','2026-10-01','2026-10-03',at);
 function use(timestamp:string,tokens:number,model='a',cached=0):Usage{
  const r=parseLine(JSON.stringify({timestamp,type:'token_usage_record',payload:{response_id:timestamp+model,thread_id:'test',usage:{input_tokens:tokens*.9,output_tokens:tokens*.1,total_tokens:tokens,cached_input_tokens:cached}}}),initialState()).usage[0];
- return {...r,model,service_tier:'default',api_equivalent_usd:tokens/1e6};
+ return {...r,quota_attribution:syntheticAttribution,model,service_tier:'default',api_equivalent_usd:tokens/1e6};
 }
-function quota(timestamp:string,used_percent:number,extra:Partial<Quota>={}):Quota{return {id:timestamp,timestamp,used_percent,source:'app_server',slot:'primary',limit_id:'codex',window_duration_mins:10080,resets_at:Date.parse('2026-10-07T00:00:00Z')/1000,raw_json:'{}',...extra};}
+function quota(timestamp:string,used_percent:number,extra:Partial<Quota>={}):Quota{return {context:syntheticContext,id:timestamp,timestamp,used_percent,source:'app_server',slot:'primary',limit_id:'codex',window_duration_mins:10080,resets_at:Date.parse('2026-10-07T00:00:00Z')/1000,raw_json:'{}',...extra};}
 const rule:PriceRule={id:'test',kind:'api',model:'a',processing_mode:'standard',effective_from:at,effective_to:null,context_min:0,context_max:null,rates:{input:2,cached_input:.2,cache_write:2,output:10},source_url:'https://example.com',retrieved_at:at,basis:'synthetic'};
 const sample=()=>{
  const rows=[use('2026-10-01T01:30:00.000Z',400e6),use('2026-10-02T01:30:00.000Z',360e6,'b'),use('2026-10-03T01:30:00.000Z',240e6)];
@@ -40,7 +44,7 @@ test('unsafe or insufficient observations keep capacity null, including combined
  const start=quota('2026-10-01T01:00:00.000Z',20),end=quota('2026-10-01T02:00:00.000Z',30);
  for(const [qs,data,reason] of [
   [[start],rows,'no_observations'],[[start,{...end,used_percent:24}],rows,'small_percent_change'],
-  [[start,{...end,used_percent:20}],rows,'small_percent_change'],[[start,end],[],'external_usage_suspected'],
+  [[start,{...end,used_percent:20}],rows,'small_percent_change'],[[start,end],[],'unverified_local_account_window_attribution'],
   [[start,{...end,used_percent:100}],rows,'saturated'],[[start,{...end,used_percent:10}],rows,'percent_decrease'],
   [[start,end],rows.map(r=>({...r,data_quality:'inconsistent'})),'inconsistent_tokens'],
   [[start,end,{...end,used_percent:31}],rows,'conflicting_snapshots']

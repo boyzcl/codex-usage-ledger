@@ -1,11 +1,13 @@
+import {quotaCycleKey,quotaContext,attributedTo,allocationReason} from './quota-policy.js';
 import {capacityView} from './capacity-policy.js';
 import type {Quota,Usage,PriceRule} from './types.js';
 import {aggregate,report,localDay,midnight,shiftDay} from './report.js';
 import {priceUsage} from './pricing.js';
 export interface Range {from:string;to_exclusive:string;timezone:string;}
-export const cycleKey=(q:Quota)=>JSON.stringify([q.limit_id,q.slot,q.window_duration_mins,q.resets_at]);
+export const cycleKey=quotaCycleKey;
 export interface Empirical {
  cycle:string;limit_id:string;slot:string;window_duration_mins:number;resets_at:number;
+ scope:ReturnType<typeof quotaContext>['scope'];attribution_reason:string|null;unallocated_tokens:number;availability:ReturnType<typeof quotaContext>['availability'];
  basis:'observed_mix_extrapolation';observed_from:string|null;observed_to:string|null;observation_count:number;
  percent_points:number|null;matched_tokens:number;matched_api_known_usd:number;priced_tokens:number;
  model_tokens:Record<string,number>;segments:{from:string;to:string;percent_points:number;tokens:number;from_percent:number;to_percent:number}[];
@@ -15,7 +17,7 @@ export interface Empirical {
 function finish(p:Empirical):Empirical {
  const delta=p.percent_points??0;
  p.api_token_coverage=p.matched_tokens>0?p.priced_tokens/p.matched_tokens:null;
- p.reason=p.flags.includes('conflicting_snapshots')?'conflicting_snapshots':p.flags.includes('percent_decrease')?'percent_decrease':p.percent_points===null?'no_observations':p.flags.includes('external_usage_suspected')?'external_usage_suspected':p.flags.includes('inconsistent_tokens')?'inconsistent_tokens':p.flags.includes('saturated')?'saturated':delta<5?'small_percent_change':p.matched_tokens<=0?'no_matched_tokens':null;
+ p.reason=p.flags.includes('conflicting_snapshots')?'conflicting_snapshots':p.flags.includes('percent_decrease')?'percent_decrease':p.percent_points===null?'no_observations':p.attribution_reason??(p.flags.includes('external_usage_suspected')?'external_usage_suspected':p.flags.includes('inconsistent_tokens')?'inconsistent_tokens':p.flags.includes('saturated')?'saturated':delta<5?'small_percent_change':p.matched_tokens<=0?'no_matched_tokens':null);
  if(!p.reason){p.estimated_tokens=p.matched_tokens*100/delta;p.estimated_api_known_usd=p.api_token_coverage? p.matched_api_known_usd*100/delta:null;
   const error=p.segments.length;p.rounding_only_lower=p.matched_tokens*100/(delta+error);p.rounding_only_upper=delta>error?p.matched_tokens*100/(delta-error):null;
  }
@@ -35,10 +37,12 @@ export function empiricalPlans(rows:Usage[],quotas:Quota[],range:Range):Empirica
   const unique=qs.filter((q,i)=>i===0||q.timestamp!==qs[i-1].timestamp);
   const q=qs[0],flags:string[]=[];
   if(qs.some((r,i)=>i&&r.timestamp===qs[i-1].timestamp&&r.used_percent!==qs[i-1].used_percent))flags.push('conflicting_snapshots');
-  const p:Empirical={cycle,limit_id:q.limit_id,slot:q.slot,window_duration_mins:q.window_duration_mins!,resets_at:q.resets_at!,basis:'observed_mix_extrapolation',observed_from:unique[0]?.timestamp??null,observed_to:unique.at(-1)?.timestamp??null,observation_count:unique.length,percent_points:null,matched_tokens:0,matched_api_known_usd:0,priced_tokens:0,model_tokens:{},segments:[],snapshots:unique.map(({timestamp,used_percent})=>({timestamp,used_percent})),flags,partial:true,estimated_tokens:null,estimated_api_known_usd:null,api_token_coverage:null,rounding_only_lower:null,rounding_only_upper:null,reason:null};
+  const eligible=rows.filter(r=>attributedTo(r,q));
+  const p:Empirical={scope:quotaContext(q).scope,availability:quotaContext(unique.at(-1)!).availability,attribution_reason:allocationReason(q,rows.filter(r=>r.timestamp>(unique[0]?.timestamp??'')&&r.timestamp<=(unique.at(-1)?.timestamp??''))),unallocated_tokens:0,cycle,limit_id:q.limit_id,slot:q.slot,window_duration_mins:q.window_duration_mins!,resets_at:q.resets_at!,basis:'observed_mix_extrapolation',observed_from:unique[0]?.timestamp??null,observed_to:unique.at(-1)?.timestamp??null,observation_count:unique.length,percent_points:null,matched_tokens:0,matched_api_known_usd:0,priced_tokens:0,model_tokens:{},segments:[],snapshots:unique.map(({timestamp,used_percent})=>({timestamp,used_percent})),flags,partial:true,estimated_tokens:null,estimated_api_known_usd:null,api_token_coverage:null,rounding_only_lower:null,rounding_only_upper:null,reason:null};
   let anchor=unique[0],last=anchor;
   const close=()=>{if(!anchor||!last||anchor===last)return;
-   const matched=rows.filter(r=>r.timestamp>anchor.timestamp&&r.timestamp<=last.timestamp);
+   const observed=rows.filter(r=>r.timestamp>anchor.timestamp&&r.timestamp<=last.timestamp);
+   const matched=observed.filter(r=>attributedTo(r,q));p.unallocated_tokens+=aggregate(observed.filter(r=>!attributedTo(r,q))).total_tokens;
    const total=aggregate(matched),delta=last.used_percent-anchor.used_percent;
    p.percent_points=(p.percent_points??0)+delta;p.matched_tokens+=total.total_tokens;p.matched_api_known_usd+=total.known_api_subtotal_usd;
    p.priced_tokens+=matched.reduce((n,r)=>n+(r.api_equivalent_usd===null?0:r.total_tokens),0);
@@ -50,7 +54,7 @@ export function empiricalPlans(rows:Usage[],quotas:Quota[],range:Range):Empirica
   for(let i=1;i<unique.length;i++){
    const next=unique[i];
    if(next.used_percent<last.used_percent){close();p.flags.push('percent_decrease');anchor=next;last=next;continue;}
-   if(next.used_percent-last.used_percent>1&&!rows.some(r=>r.total_tokens>0&&r.timestamp>last.timestamp&&r.timestamp<=next.timestamp))p.flags.push('external_usage_suspected');
+   if(!p.attribution_reason&&next.used_percent-last.used_percent>1&&!eligible.some(r=>r.total_tokens>0&&r.timestamp>last.timestamp&&r.timestamp<=next.timestamp))p.flags.push('external_usage_suspected');
    if(Date.parse(next.timestamp)-Date.parse(last.timestamp)>30*60000)p.flags.push('sampling_gap');
    last=next;
   }
@@ -69,7 +73,7 @@ export function combinePlans(plans:Empirical[]):Empirical[]{
   old.observed_from=[old.observed_from,p.observed_from].filter(Boolean).sort()[0]??null;
   old.observed_to=[old.observed_to,p.observed_to].filter(Boolean).sort().at(-1)??null;
   old.observation_count+=p.observation_count;old.percent_points=old.percent_points===null&&p.percent_points===null?null:(old.percent_points??0)+(p.percent_points??0);
-  old.matched_tokens+=p.matched_tokens;old.matched_api_known_usd+=p.matched_api_known_usd;old.priced_tokens+=p.priced_tokens;
+  old.unallocated_tokens+=p.unallocated_tokens;old.attribution_reason??=p.attribution_reason;old.matched_tokens+=p.matched_tokens;old.matched_api_known_usd+=p.matched_api_known_usd;old.priced_tokens+=p.priced_tokens;
   for(const [model,tokens] of Object.entries(p.model_tokens))old.model_tokens[model]=(old.model_tokens[model]??0)+tokens;
   old.snapshots=[...(old.snapshots??[]),...(p.snapshots??[])];old.segments.push(...p.segments);old.flags=[...new Set([...old.flags,...p.flags])];old.partial||=p.partial;
  }
@@ -104,12 +108,12 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
  }
  const modelsCurrent=Object.fromEntries(Object.keys(base.models).map(model=>[model,{...base.models[model],current_price_valuation:aggregate(priced.filter(r=>r.model===model)),plan_percent_points:null,estimated_plan_tokens:null}]));
  const cycles=combinePlans(daily.flatMap(d=>d.plans));
- const restrict=(p:Empirical)=>{p.strict_reason='unverified_account_window_attribution';p.experimental=!!options.experimentalEmpirical;
+ const restrict=(p:Empirical)=>{p.strict_reason=p.attribution_reason??'unverified_account_window_attribution';p.experimental=!!options.experimentalEmpirical;
   if(!options.experimentalEmpirical){p.estimated_tokens=null;p.estimated_api_known_usd=null;p.rounding_only_lower=null;p.rounding_only_upper=null;p.reason??=p.strict_reason;}return capacityView(p,!!options.experimentalEmpirical);};
  for(const d of daily)d.plans=d.plans.map(p=>{
   const invalid=cycles.find(c=>c.cycle===p.cycle)?.flags.filter(f=>f==='percent_decrease'||f==='conflicting_snapshots')??[];
   if(invalid.length){p.flags=[...new Set([...p.flags,...invalid])];p=finish({...p,estimated_tokens:null,estimated_api_known_usd:null,rounding_only_lower:null,rounding_only_upper:null});}
   return restrict(p);
  });
- return {...base,display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:cycles.map(restrict),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,experimental_empirical:!!options.experimentalEmpirical,strict_reason:'unverified_account_window_attribution',allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
+ return {...base,as_of:at,observation_coverage:{status:'partial',from:quotas[0]?.timestamp??null,to:quotas.at(-1)?.timestamp??null,samples:quotas.length,note:'Observed samples do not establish continuous account history.'},display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:cycles.map(restrict),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,experimental_empirical:!!options.experimentalEmpirical,strict_reason:'unverified_account_window_attribution',allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
 }

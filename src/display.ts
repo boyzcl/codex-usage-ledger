@@ -9,10 +9,11 @@ const percent=(ratio:unknown)=>valid(ratio)?`${exact(Number((ratio*100).toFixed(
 const safe=(s:unknown)=>stripVTControlCharacters(String(s??'未知')).replace(/[\p{Cc}\p{Cf}]/gu,' ');
 export function cellWidth(s:string){return [...stripVTControlCharacters(s)].reduce((n,c)=>n+(/\p{Mark}/u.test(c)?0:/[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6]|\p{Extended_Pictographic}/u.test(c)?2:1),0);}
 function wrap(line:string,width:number){const out:string[]=[];let part='',n=0;for(const c of line){const size=cellWidth(c);if(n+size>width){out.push(part);part='';n=0;}part+=c;n+=size;}out.push(part);return out;}
-const reasons:Record<string,string>={unverified_account_window_attribution:'账号与额度窗口归属尚未核实',unknown_bucket_model_mapping:'缺少模型与额度窗口的映射',missing_verified_allowance_weights:'缺少已验证的模型额度权重',no_observations:'尚未采到额度数据',insufficient_clean_spans:'可用于推算的消耗区间不足',insufficient_clean_spans_or_coverage:'有效消耗区间或覆盖率不足'};
+const reasons:Record<string,string>={unverified_workspace_billing_identity:'后台账号范围已知，工作区/计费归属仍未完全核实',partial_local_account_window_attribution:'部分本地用量仍未归属，不能外推整体容量',unknown_account_identity:'额度快照缺少可验证账号身份',mixed_account_identity:'额度身份存在冲突，未拼接观测',unverified_local_account_window_attribution:'本地用量与账号及额度窗口的对应关系未知',unverified_account_window_attribution:'账号与额度窗口归属尚未核实',unknown_bucket_model_mapping:'缺少模型与额度窗口的映射',missing_verified_allowance_weights:'缺少已验证的模型额度权重',no_observations:'尚未采到额度数据',insufficient_clean_spans:'可用于推算的消耗区间不足',insufficient_clean_spans_or_coverage:'有效消耗区间或覆盖率不足'};
 const issues:Record<string,[string,string]>={
  inconsistent_token_components:['Token 拆分不一致','保留总量；不对不一致的拆分计价。'],inherited_legacy_skipped:['已排除继承记录','去重处理，不代表新增数据丢失。'],legacy_initial_baseline_gap:['旧记录起始基线缺口','首次记录之前的消耗可能无法恢复。'],unrecoverable_usage_gap:['无法恢复的历史用量','现有日志不足，不能凭空补齐。'],unresolved_fork_history:['分叉历史无法确认','无法确认的继承部分未重复计入。'],malformed_line:['日志行格式损坏','该行未入账；其他完整记录继续处理。'],oversized_line_skipped:['日志行超过读取上限','该行已跳过，保留偏移用于排查。'],missing_timestamp:['记录缺少时间','无法按日期归属的记录需要核对。'],invalid_usage_record:['用量字段无效','该记录未作为有效用量入账。']};
 export const errorMessages:Record<string,string>={
+ repair_quota_context_conflict:'同一额度事实的身份/可用状态投影冲突，修复已回滚；原始证据保留。',
  repair_quota_fact_conflict:'同一 ID 的额度事实冲突，修复事务已回滚。原始输入和基线备份保留，请核对副本；本次未切换生产账本。',
  sqlite_backup_unavailable:'账本修复需要 node:sqlite.backup（Node.js 22 系列至少为 22.16.0）。请升级运行时；本次未创建输出。',
  report_range_too_large:'逐日报表最多支持 10 年，请缩小日期范围。',unknown_command:'命令不存在，请运行 cux --help 查看用法。',unknown_service_action:'服务操作不存在，请使用 status、start、stop、restart、install 或 uninstall。',unknown_export_kind:'导出类型不存在，请运行 cux --help 查看支持的类型。',invalid_date:'日期格式有误，请使用 YYYY-MM-DD 或有效时间戳。',invalid_date_range:'日期范围有误，开始时间必须早于结束时间。',invalid_arguments:'参数有误，请运行 cux --help 查看用法。',monitor_already_running:'自动监控已在运行，无需再启动 watch。请运行 cux service status 查看。',service_not_installed:'尚未安装后台服务，请运行 cux service install。',export_file_already_exists:'导出文件已存在，请换一个文件名；已有文件未被覆盖。',rpc_timeout:'官方查询超时；已保存的数据仍可读取。',app_server_exited:'官方采集进程已退出，请运行 cux doctor --online 检查。',app_server_spawn_failed:'无法启动官方采集进程，请检查 Codex 程序路径。',service_start_timeout:'后台服务启动未在等待时间内完成，请运行 cux service status 检查。',service_stop_timeout:'后台服务仍在退出，请稍后运行 cux service status 检查。',data_home_must_be_separate_from_codex_home:'账本目录与 Codex 源目录不能互相包含，请调整 --data-home。',invalid_monitor_interval:'采集间隔配置无效，请检查 config.json 中的 monitor。',invalid_poll_seconds:'旧轮询间隔配置无效，请检查 config.json。',service_requires_macos:'系统服务管理目前仅支持 macOS。',read_only_app_server_requires_macos_sandbox:'当前环境不支持受只读保护的在线采集，可使用 sync --offline。',rollout_directory_unreadable:'无法读取 Codex 日志目录，请检查目录和读取权限。',operation_failed:'操作未完成，请运行 cux doctor --details 检查，或加 --json 获取错误代码。'};
@@ -33,11 +34,28 @@ export function format(value:any,options:DisplayOptions={}):string {
  const windowName=(mins:unknown)=>!valid(mins)?'长度未知的额度窗口':mins%1440===0?`${exact(mins/1440)} 天额度窗口`:mins%60===0?`${exact(mins/60)} 小时额度窗口`:`${exact(mins)} 分钟额度窗口`;
  const methodName=(m:string)=>({'account/read':'账户信息','account/rateLimits/read':'官方额度','account/usage/read':'账户用量'}[m]??safe(m));
  function collection(r:any){if(!r)return;const status=r.status==='ok'?'成功':r.status==='skipped'?'离线，未查询':'失败或部分失败';pair('官方采集',status);if(r.timestamp)pair('查询时间',stamp(r.timestamp));for(const [method,status] of Object.entries(r.methods??{})){if(details||status!=='ok')add(`${methodName(method)}：${status==='ok'?'成功':errorMessages[String(status)]??'查询失败'}${details&&status!=='ok'?'（'+safe(status)+'）':''}`,status==='ok'?undefined:33);}if(r.code)add(errorMessages[r.code]??'查询失败，请运行 cux doctor --online 检查。',33);}
+ function officialAvailability(snapshot:any){
+  if(!snapshot)return;const a=snapshot.availability;section('官方可用状态 · 最近观测');
+  pair('普通用量',a?.ordinary_usage_allowed===true?'官方允许':a?.ordinary_usage_allowed===false?'官方不允许':'未知');
+  pair('支出控制',a?.spend_control_reached===true?'已达到限制':a?.spend_control_reached===false?'未达到限制':'未知');
+  if(a?.sampled_at)add('状态采样于 '+stamp(a.sampled_at),2);
+  add('状态独立于剩余百分比；重置时间不保证恢复。',2);add('此为所示时刻的采样，不保证之后的实时许可。',2);
+  if(snapshot.scope?.status!=='verified')add('账号/工作区与本地用量归属尚未完全核实。',33);
+ }
+ function workload(v:any){
+  if(!v)return;section('最近用量 · 本地记录');
+  for(const w of v.windows??[])if(['last_7_days','last_30_days'].includes(w.name)){
+   pair(w.name==='last_7_days'?'最近 7 天':'最近 30 天',num(w.totals.total_tokens)+' Token');
+   if(details){pair('查询起点',stamp(w.from));pair('查询终点（不含）',stamp(w.to_exclusive));pair('首末观测',stamp(w.coverage.observed_from)+' → '+stamp(w.coverage.observed_to));}
+  }
+  add('按滚动范围独立查询；仅为已记录本地历史，未分配到账号或额度窗口。',2);
+ }
  function quotas(qs:any[]){
   section('额度');
   if(!qs.length)add('暂无有效额度快照，请运行 cux sync 或检查采集状态。',33);
   for(const [i,q] of qs.entries()){
    if(i)add();add(`${safe(q.limit_id)} · ${windowName(q.window_duration_mins)}`,2);
+   if(q.availability){pair('普通用量',q.availability.ordinary_usage_allowed===true?'官方允许':q.availability.ordinary_usage_allowed===false?'官方不允许':'未知');pair('支出控制',q.availability.spend_control_reached===true?'已达到限制':q.availability.spend_control_reached===false?'未达到限制':'未知');}
    const p=q.used_percent;
    if(valid(p)&&p>=0&&p<=100){pair('剩余 '+percent((100-p)/100),'已用 '+percent(p/100),1);const size=Math.min(24,width);const filled=Math.round(size*p/100);add('█'.repeat(filled)+'░'.repeat(size-filled),p>=90?33:36);}
    else add('额度百分比暂不可用',33);
@@ -45,7 +63,7 @@ export function format(value:any,options:DisplayOptions={}):string {
    add('额度更新于 '+age(q.timestamp),2);
    const policy=(value.monitor??options.monitor)?.policy;const staleSeconds=Math.max(300,policy?.quota_idle_seconds??900)*2;
    if(now-Date.parse(q.timestamp)>staleSeconds*1000)add('注意：额度快照较旧，不代表当前实时剩余量。',33);
-   if(details){pair('数据来源',q.source==='app_server'?'官方查询':q.source==='rollout'?'本地日志中的额度':q.source);pair('窗口位置',q.slot??'未知');}
+   if(details){pair('身份状态',q.scope?.status??'unknown');pair('数据来源',q.source==='app_server'?'官方查询':q.source==='rollout'?'本地日志中的额度':q.source);pair('窗口位置',q.slot??'未知');}
   }
   const c=value.collection??options.collection;if(c&&c.status!=='ok'){add('最近额度查询失败，以上为已有快照。',33);if(details)collection(c);}
  }
@@ -93,7 +111,7 @@ export function format(value:any,options:DisplayOptions={}):string {
    }
    const experimental=c.basis==='experimental_credit_proxy';
    if(brief){add(`套餐总容量 · ${safe(c.limit_id)}：${c.estimated_capacity==null?'—':`约 ${num(c.estimated_capacity)} 加权额度单位`}`,c.estimated_capacity==null?33:undefined);if(c.estimated_capacity==null)add(reasons[c.reason]??'证据不足',33);if(experimental)add('实验性 credits 代理估计，不是官方容量。',33);continue;}
-   section(`${safe(c.limit_id)} · ${windowName(c.window_duration_mins)}`);
+   section(`${safe(c.limit_id)} · ${windowName(c.window_duration_mins)}`);officialAvailability({scope:c.scope,availability:c.availability});if(details)workload(c.workload);
    if(c.estimated_capacity==null){add('暂不可推算',33);add(reasons[c.reason]??'证据不足');}
    else{pair('容量估计',num(c.estimated_capacity)+' 加权额度单位');pair('估计范围',num(c.lower_bound)+' ～ '+num(c.upper_bound));pair('可信程度',({HIGH:'较高',MEDIUM:'中等',LOW:'较低'} as any)[c.confidence]??'未知');add('范围反映取整误差及观测差异，不是 95% 置信区间。',2);}
    add(experimental?'依据：实验性 credits 代理；映射由用户提供，不是官方容量。':'方法：仅使用已验证的额度权重，缺少权重时不输出容量。',experimental?33:2);
@@ -167,7 +185,7 @@ export function format(value:any,options:DisplayOptions={}):string {
   add('API 金额为按当前价格重估的已知小计，并非订阅账单；模型行不可与合计再次相加。',2);
   add('100% 等效 Token 是经验外推，并非官方上限；假设模型/速度/缓存组合不变且无未记录消耗。',2);
   if(v.plan_cycles.length>1)add('存在多个额度窗口或重置周期，分别列示；不同周期的百分比不合并。',33);
-  const reasons:Record<string,string>={unverified_account_window_attribution:'账号与额度窗口归属尚未核实',conflicting_snapshots:'同一时刻额度快照冲突',no_observations:'缺少成对观测',small_percent_change:'变化不足 5 个百分点',percent_decrease:'区间内百分比回退',external_usage_suspected:'存在疑似外部消耗',inconsistent_tokens:'Token 数据不一致',saturated:'额度已达 100%，观测受上限影响',no_matched_tokens:'没有匹配的本地 Token'};
+  const reasons:Record<string,string>={unverified_workspace_billing_identity:'后台账号范围已知，工作区/计费归属仍未完全核实',partial_local_account_window_attribution:'部分本地用量仍未归属，不能外推整体容量',unknown_account_identity:'额度快照缺少可验证账号身份',mixed_account_identity:'额度身份存在冲突，未拼接观测',unverified_local_account_window_attribution:'本地用量与账号及额度窗口的对应关系未知',unverified_account_window_attribution:'账号与额度窗口归属尚未核实',conflicting_snapshots:'同一时刻额度快照冲突',no_observations:'缺少成对观测',small_percent_change:'变化不足 5 个百分点',percent_decrease:'区间内百分比回退',external_usage_suspected:'存在疑似外部消耗',inconsistent_tokens:'Token 数据不一致',saturated:'额度已达 100%，观测受上限影响',no_matched_tokens:'没有匹配的本地 Token'};
   const emptyDays=v.daily.filter((d:any)=>!d.plans.length).map((d:any)=>dayLabel(d.date));
   if(emptyDays.length)add('无官方成对快照的日期不估算 Plan 消耗或容量。',2);
   for(const day of v.daily){for(const [i,p] of day.plans.entries()){
@@ -180,12 +198,12 @@ export function format(value:any,options:DisplayOptions={}):string {
  function syncResult(v:any){title('同步结果');section('本地记录');pair('新增记录',exact(v.rollout?.added_records));pair('变化文件',exact(v.rollout?.changed_files));pair('检查文件',exact(v.rollout?.files));if(v.rollout?.malformed_or_oversized_lines)add('发现损坏或超限日志行，请运行 cux doctor 查看。',33);pair('完成时间',stamp(v.rollout?.synced_at));section('官方数据');collection(v.account);}
  if(command==='status'){
   title('Codex 用量账本 · '+safe(({pro:'Pro',plus:'Plus',free:'Free',business:'Business',enterprise:'Enterprise'} as any)[value.account?.plan]??value.account?.plan??'套餐未知'));
-  quotas(value.quota??[]);section('今日用量');tokens(value.today?.totals);valuation(value.today?.current_price_valuation,value.today?.totals);
+  officialAvailability(value.official_availability);quotas(value.quota??[]);section('今日用量');tokens(value.today?.totals);valuation(value.today?.current_price_valuation,value.today?.totals);
   if(value.legacy_reconciliation?.conflict_records)add('争议用量记录：'+num(value.legacy_reconciliation.conflict_records)+' 条；双方证据保留，未计入确认用量，数量待核对。',33);
   if(value.legacy_reconciliation?.pending_tokens)add('待核对的分叉 Token：'+num(value.legacy_reconciliation.pending_tokens)+'；未计入确认用量。',33);
   if(value.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(value.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
   if(value.today?.totals?.source_unavailable_tokens)add('今日含缺源历史 Token：'+num(value.today.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);
-  section('采集状态');monitor(value.monitor,value.last_sync);add();capacity(value.capacity??[],true);quality(value.issues??[]);
+  workload(value.workload);section('采集状态');monitor(value.monitor,value.last_sync);add();capacity(value.capacity??[],true);quality(value.issues??[]);
   if(details){section('账户总量核对');pair('本地累计 Token',num(value.account_cross_check?.local_tokens));pair('官方累计 Token',num(value.account_cross_check?.official_lifetime_tokens));pair('本地减官方',num(value.account_cross_check?.difference));pair('官方汇总采集时间',stamp(value.account_cross_check?.official_observed_at));add('范围、保留期限和上报延迟不同，差额不能直接当作外部消耗。',2);modelTable(value.today);quality(value.issues??[],true);}
   else{add();add('更多明细：cux status --details',2);}
  }else if(['today','week','month','report','models'].includes(command)){
@@ -195,9 +213,9 @@ export function format(value:any,options:DisplayOptions={}):string {
    if(midnight&&startsAtMidnight&&!details)add(`统计范围：${stamp(start).split(' ')[0]} 至 ${stamp(new Date(Date.parse(end)-1).toISOString()).split(' ')[0]}（含末日）`,2);
    else add(`统计范围：${stamp(start)} 至 ${stamp(end)}（不含结束时刻）`,2);
   }
-  if(value.daily){dailyTable(value);if(details){section('用量合计 · 精确口径');tokens(value.totals);valuation(value.current_price_valuation,value.totals);}}else{section('用量合计');tokens(value.totals);valuation(value.current_price_valuation,value.totals);modelTable(value);}
+  officialAvailability(value.official_availability);if(value.daily){dailyTable(value);if(details){section('用量合计 · 精确口径');tokens(value.totals);valuation(value.current_price_valuation,value.totals);}}else{section('用量合计');tokens(value.totals);valuation(value.current_price_valuation,value.totals);modelTable(value);}
   if(!details){add();add(`精确数字与完整明细：cux ${command} --details${command==='report'?'（沿用日期参数）':''}`,2);}
- }else if(command==='quota'){title('Codex 额度');quotas(value.windows??[]);if(details){section('采集状态');monitor(value.monitor);collection(value.collection);}}
+ }else if(command==='quota'){title('Codex 额度');officialAvailability(value.official_availability);quotas(value.windows??[]);if(details){section('采集状态');monitor(value.monitor);collection(value.collection);}}
  else if(command==='estimate'){title('套餐容量推算');capacity(Array.isArray(value)?value:[]);if(!details){add();add('详细依据：cux estimate --details',2);}}
  else if(command==='doctor'){
   title('账本诊断');section('当前检查');add(value.ok?'✓ 本次基础检查通过':'! 本次检查发现异常',value.ok?32:33);

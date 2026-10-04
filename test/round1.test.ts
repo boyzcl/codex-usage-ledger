@@ -1,3 +1,4 @@
+import {responseContext} from '../src/quota-policy.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,mkdirSync,writeFileSync,appendFileSync,rmSync} from 'node:fs';
@@ -45,9 +46,11 @@ test('R1 complete settings omission clears tier and effort; reroute retains unre
  parseLine(settings('test','b',{service_tier:null,reasoning_effort:null}),state);assert.equal(state.service_tier,'unknown');assert.equal(state.reasoning_effort,null);
 });
 test('R1 single snapshot before cross-day decrease invalidates capacity',()=>{
+ const context=responseContext({accountId:'synthetic'},null,'2026-10-01T00:00:00.000Z','app_server');context.scope={...context.scope,workspace_ref:'synthetic-workspace',billing_source:'synthetic-included',status:'verified'};
  const range=period('report','UTC','2026-10-01','2026-10-02','2026-10-03T00:00:00.000Z');
- const quota=(timestamp:string,used_percent:number):Quota=>({id:timestamp,timestamp,used_percent,source:'app_server',slot:'primary',limit_id:'codex',window_duration_mins:10080,resets_at:Date.parse('2026-10-07T00:00:00Z')/1000,raw_json:'{}'});
+ const quota=(timestamp:string,used_percent:number):Quota=>({context,id:timestamp,timestamp,used_percent,source:'app_server',slot:'primary',limit_id:'codex',window_duration_mins:10080,resets_at:Date.parse('2026-10-07T00:00:00Z')/1000,raw_json:'{}'});
  const row=parseLine(line('token_usage_record',{response_id:'q',usage:tokens(100)},'2026-10-02T01:30:00.000Z'),initialState()).usage[0];
+ row.quota_attribution={scope:context.scope,limit_id:'codex',slot:'primary',window_duration_mins:10080,resets_at:Date.parse('2026-10-07T00:00:00Z')/1000,source:'source_event'};
  const result=dailyReport([row],[quota('2026-10-01T01:00:00.000Z',90),quota('2026-10-02T01:00:00.000Z',10),quota('2026-10-02T02:00:00.000Z',20)],[],range,'2026-10-03T00:00:00.000Z');
  assert.equal(result.plan_cycles[0].estimated_tokens,null);assert.equal(result.plan_cycles[0].reason,'percent_decrease');
  const experiment=dailyReport([row],[quota('2026-10-01T01:00:00.000Z',90),quota('2026-10-02T01:00:00.000Z',10),quota('2026-10-02T02:00:00.000Z',20)],[],range,'2026-10-03T00:00:00.000Z',{experimentalEmpirical:true});
@@ -104,8 +107,8 @@ test('R1 default capacity is unknown and explicit experiment retains strict reas
  const quota=(timestamp:string,used_percent:number):Quota=>({id:timestamp,timestamp,used_percent,source:'app_server',slot:'primary',limit_id:'codex',window_duration_mins:10080,resets_at:Date.parse('2026-10-07T00:00:00Z')/1000,raw_json:'{}'});
  const row=parseLine(line('token_usage_record',{response_id:'q',usage:tokens(100)},'2026-10-02T01:30:00.000Z'),initialState()).usage[0];
  const qs=[quota('2026-10-02T01:00:00.000Z',10),quota('2026-10-02T02:00:00.000Z',20)];
- const normal=dailyReport([row],qs,[],range,'2026-10-03T00:00:00.000Z');assert.equal(normal.plan_cycles[0].estimated_tokens,null);assert.equal(normal.plan_cycles[0].strict_reason,'unverified_account_window_attribution');
- const experiment=dailyReport([row],qs,[],range,'2026-10-03T00:00:00.000Z',{experimentalEmpirical:true});assert.equal(experiment.plan_cycles[0].estimated_tokens,1000);assert.equal(experiment.plan_cycles[0].strict_reason,'unverified_account_window_attribution');
+ const normal=dailyReport([row],qs,[],range,'2026-10-03T00:00:00.000Z');assert.equal(normal.plan_cycles[0].estimated_tokens,null);assert.equal(normal.plan_cycles[0].strict_reason,'unknown_account_identity');
+ const experiment=dailyReport([row],qs,[],range,'2026-10-03T00:00:00.000Z',{experimentalEmpirical:true});assert.equal(experiment.plan_cycles[0].estimated_tokens,null);assert.equal(experiment.plan_cycles[0].strict_reason,'unknown_account_identity');
 });
 test('R1 reparse keeps provider record ahead of its compaction recovery copy',async()=>{
  const f=fixture();try{const p=join(f.source,'copy.jsonl');const usage={response_id:'same',usage:tokens(100)};const ls=[meta('same'),settings('same','a',{service_tier:'fast'}),line('token_usage_record',usage),line('compacted',{compaction_response_id:'same',latest_token_usage_record:usage})];writeFileSync(p,ls.join('\n')+'\n');await syncRollouts(f.db,f.source,[],undefined,[p]);

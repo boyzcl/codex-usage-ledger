@@ -66,6 +66,8 @@ export async function repairPreview(input:string,codexHome:string,outDir:string,
      OR q.used_percent IS NOT r.used_percent OR q.source IS NOT r.source LIMIT 1`).get();
    if(quotaConflict)throw Error('repair_quota_fact_conflict');
    addedQuota=Number(corrected.db.prepare('INSERT OR IGNORE INTO quota_snapshots SELECT * FROM reparsed.quota_snapshots').run().changes);
+   if(corrected.db.prepare('SELECT 1 FROM quota_context q JOIN reparsed.quota_context r USING(id) WHERE q.context_json<>r.context_json LIMIT 1').get())throw Error('repair_quota_context_conflict');
+   corrected.db.prepare('INSERT OR IGNORE INTO quota_context SELECT * FROM reparsed.quota_context').run();
    for(const c of corrected.db.prepare('SELECT raw_json FROM legacy_candidates').all()){
     const row=JSON.parse(c.raw_json as string) as Usage;
     corrected.db.prepare('INSERT OR IGNORE INTO legacy_candidate_history VALUES (?,?,?)').run(row.id,c.raw_json,'source_unavailable');

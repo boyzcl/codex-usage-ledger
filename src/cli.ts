@@ -1,3 +1,5 @@
+import {currentWorkload} from './workload.js';
+import {quotaContext} from './quota-policy.js';
 import {capacityView} from './capacity-policy.js';
 import {parseArgs} from 'node:util';
 import {homedir} from 'node:os';
@@ -79,33 +81,34 @@ async function main(){
  const db=new Ledger(join(home,'usage.db'));chmodSync(join(home,'usage.db'),0o600);
  const client=new AppServer(config,home);db.savePrices(rules);
  const show=(value:unknown)=>console.log(opts.values.json?JSON.stringify(value,null,2):format(value,{...view,collection:db.get('collection:account/rateLimits/read')}));
+ let current:ReturnType<typeof currentWorkload>|undefined;
+ let asOf=new Date().toISOString();
+ function currentData(){return current??=currentWorkload(db,db.latestQuota(asOf),asOf,config.timezone);}
  function empiricalCurrent(){
-  const latest=db.latestQuota();const starts=latest.filter(q=>q.resets_at&&q.window_duration_mins).map(q=>new Date((q.resets_at!-q.window_duration_mins!*60)*1000).toISOString()).sort();
-  if(!starts.length)return [];const now=new Date().toISOString(),from=starts[0],to=new Date(Date.parse(now)+1).toISOString();
-  const prices=db.rules();const rows=db.records(from,to).map(r=>({...priceUsage({...r,timestamp:now},prices),timestamp:r.timestamp}));
-  return empiricalPlans(rows,db.officialQuotas(from,to),{from,to_exclusive:to,timezone:config.timezone}).filter(p=>latest.some(q=>cycleKey(q)===p.cycle));
+  const latest=db.latestQuota(asOf),data=currentData(),range=data.view.query;
+  const prices=db.rules();const rows=data.rows.map(r=>({...priceUsage({...r,timestamp:asOf},prices),timestamp:r.timestamp}));
+  return empiricalPlans(rows,db.officialQuotas(range.from,range.to_exclusive),range).filter(p=>latest.some(q=>cycleKey(q)===p.cycle));
  }
- function withEmpirical(caps:any[]){const empirical=opts.values['experimental-empirical']?empiricalCurrent():[];return caps.map(c=>({...capacityView(c),status:opts.values['experimental-empirical']?'experimental_unverified':'unverified',experimental:!!opts.values['experimental-empirical'],estimated_capacity:null,lower_bound:null,upper_bound:null,equivalents:{},strict_reason:c.reason??'unverified_account_window_attribution',reason:c.reason??'unverified_account_window_attribution',empirical:empirical.map(p=>capacityView(p,true)).find(p=>p.limit_id===c.limit_id&&p.slot===c.slot&&p.resets_at===c.resets_at&&p.window_duration_mins===c.window_duration_mins)??null}));}
+ function withEmpirical(caps:any[]){const empirical=opts.values['experimental-empirical']?empiricalCurrent():[];return caps.map(c=>({...capacityView(c),status:opts.values['experimental-empirical']?'experimental_unverified':'unverified',experimental:!!opts.values['experimental-empirical'],estimated_capacity:null,lower_bound:null,upper_bound:null,equivalents:{},strict_reason:c.strict_reason??c.reason??'unverified_account_window_attribution',reason:c.reason??'unverified_account_window_attribution',empirical:empirical.map(p=>capacityView({...p,strict_reason:p.attribution_reason??'unverified_account_window_attribution'},true)).find(p=>p.cycle===c.cycle)??null}));}
  function estimates(){
-  const latest=db.latestQuota();
-  const qs=db.cycleQuotas(latest);
-  const earliest=latest.filter(q=>q.resets_at!==null&&q.window_duration_mins!==null).map(q=>new Date((q.resets_at!-q.window_duration_mins!*60)*1000).toISOString()).sort()[0];
-  const result=quotaEstimates(qs,earliest?db.records(earliest):[],config,db.rules());
-  db.transaction(()=>{db.preserveEstimates('superseded');for(const r of result)db.db.prepare('INSERT OR REPLACE INTO capacity_estimates VALUES (?,?,?)').run(hash(r.cycle),new Date().toISOString(),JSON.stringify(r));db.set('latest_estimates',result);});return result;
+  const latest=db.latestQuota(asOf),data=currentData();
+  const result=quotaEstimates(db.cycleQuotas(latest),data.rows,config,db.rules(),asOf).map(r=>({...r,workload:{as_of:asOf,query:data.view.query,windows:data.view.windows.filter(w=>w.name==='last_7_days'||w.name==='last_30_days'||w.name===r.cycle)}}));
+  db.transaction(()=>{db.preserveEstimates('superseded');db.db.prepare('DELETE FROM capacity_estimates').run();for(const r of result)db.db.prepare('INSERT OR REPLACE INTO capacity_estimates VALUES (?,?,?)').run(hash(r.cycle),asOf,JSON.stringify(r));db.set('latest_estimates',result);});return result;
  }
+
  async function sync(){
   const rollout=await syncRollouts(db,config.codex_home,db.rules(),(n,total)=>{if(process.stderr.isTTY&&!opts.values.json)console.error(`正在导入：${n}/${total} 个文件`);});
   const account=opts.values.offline?{status:'skipped'}:await collectAccount(db,client);
-  estimates();return {rollout,account};
+  current=undefined;asOf=new Date().toISOString();estimates();return {rollout,account};
  }
  try{
   if(command==='sync'){show(await sync());return;}
   if(command==='watch'){
-   await runMonitor(db,client,config,home,{offline:opts.values.offline,once:opts.values.once,show,estimates});return;
+   await runMonitor(db,client,config,home,{offline:opts.values.offline,once:opts.values.once,show,estimates:()=>{current=undefined;asOf=new Date().toISOString();return estimates();}});return;
   }
   if(command==='export'){const result=await exportData(db,opts.positionals[1]??'usage',period('report',config.timezone,opts.values.from,opts.values.to),opts.values.out);if(opts.values.out)show(result);return;}
   if(command==='estimate'){show(withEmpirical(estimates()));return;}
-  if(command==='quota'){show({account:db.get('account'),windows:quotaView(db),collection:db.get('collection:account/rateLimits/read'),monitor:db.get('monitor_state')});return;}
+  if(command==='quota'){show({as_of:asOf,official_availability:db.get('official_availability'),account:db.get('account'),windows:quotaView(db,asOf),collection:db.get('collection:account/rateLimits/read'),monitor:db.get('monitor_state')});return;}
   if(command==='doctor'){
    const integrity=db.db.prepare('PRAGMA quick_check').get();const checks={sqlite:integrity?.quick_check==='ok',source_exists:existsSync(config.codex_home),pricing_rules_valid:rules.length>0,readonly_collector_supported:process.platform==='darwin',sync_completed:!!db.get('last_sync')};
    const online=opts.values.online?await collectAccount(db,client):null;const ok=Object.values(checks).every(Boolean)&&(!online||online.status==='ok');
@@ -114,10 +117,10 @@ async function main(){
   if(command==='models'){show(report(db.records(),db.rules()));return;}
   const range=period(command==='status'?'today':command,config.timezone,opts.values.from,opts.values.to);
   const rows=db.records(range.from,range.to_exclusive);
-  if(command!=='status'){show({period:range,legacy_reconciliation:db.get('legacy_reconciliation'),...dailyReport(rows,db.officialQuotas(range.from,range.to_exclusive),db.rules(),range,undefined,{experimentalEmpirical:opts.values['experimental-empirical']})});return;}
+  if(command!=='status'){show({official_availability:db.get('official_availability'),period:range,legacy_reconciliation:db.get('legacy_reconciliation'),...dailyReport(rows,db.officialQuotas(range.from,range.to_exclusive),db.rules(),range,undefined,{experimentalEmpirical:opts.values['experimental-empirical']})});return;}
   const lifetime=db.db.prepare('SELECT COALESCE(SUM(total_tokens),0) AS total FROM usage_records').get()!.total as number;
   const official=db.latestAccount();const day=localDay(new Date().toISOString(),config.timezone);const weekStart=midnight(shiftDay(day,-6),config.timezone);
-  show({as_of:new Date().toISOString(),legacy_reconciliation:db.get('legacy_reconciliation'),monitor:db.get('monitor_state'),account:db.get('account'),quota:quotaView(db),today:{period:range,...report(rows,db.rules())},last_7_calendar_days:aggregate(db.records(weekStart)),capacity:withEmpirical(db.get<any[]>('latest_estimates')??[]),last_sync:db.get('last_sync'),account_cross_check:{local_tokens:lifetime,official_lifetime_tokens:official?.summary?.lifetimeTokens??null,difference:official?.summary?.lifetimeTokens==null?null:lifetime-official.summary.lifetimeTokens,official_observed_at:official?.timestamp??null,note:'Account scope, retention, recording gaps and reporting delay differ; difference is not automatically external usage.'},issues:db.issues()});
+  show({as_of:asOf,official_availability:db.get('official_availability'),workload:currentData().view,legacy_reconciliation:db.get('legacy_reconciliation'),monitor:db.get('monitor_state'),account:db.get('account'),quota:quotaView(db,asOf),today:{period:range,...report(rows,db.rules())},last_7_calendar_days:aggregate(db.records(weekStart)),capacity:withEmpirical(estimates()),last_sync:db.get('last_sync'),account_cross_check:{local_tokens:lifetime,official_lifetime_tokens:official?.summary?.lifetimeTokens??null,difference:null,strict_reason:'unverified_local_account_attribution',official_observed_at:official?.timestamp??null,note:'Local lifetime facts have no proven account attribution; official lifetime scope is not supplied by account/usage/read. No numeric comparison is claimed.'},issues:db.issues()});
  }finally{client.close();db.close();}
 }
-function quotaView(db:Ledger){return db.latestQuota().map(({raw_json,...q})=>({...q,remaining_percent:100-q.used_percent,reset_iso:q.resets_at?new Date(q.resets_at*1000).toISOString():null,age_seconds:Math.max(0,(Date.now()-Date.parse(q.timestamp))/1000),plan_type:JSON.parse(raw_json)?.planType??JSON.parse(raw_json)?.plan_type??null}));}
+function quotaView(db:Ledger,asOf=new Date().toISOString()){return db.latestQuota(asOf).map(q=>{const {raw_json,...fields}=q;delete fields.context;return {...fields,scope:quotaContext(q).scope,availability:quotaContext(q).availability,evidence:quotaContext(q).evidence,remaining_percent:100-q.used_percent,reset_iso:q.resets_at?new Date(q.resets_at*1000).toISOString():null,age_seconds:Math.max(0,(Date.now()-Date.parse(q.timestamp))/1000),plan_type:JSON.parse(raw_json)?.planType??JSON.parse(raw_json)?.plan_type??null};});}

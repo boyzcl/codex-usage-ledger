@@ -120,7 +120,7 @@ API 等效金额不是订阅实际付款。`null` 或 `unknown` 表示证据不�
 
 ## 3. 获取原始事实明细
 
-`export` 导出 JSONL：每行一个 JSON 对象。第一行是文件说明，当前 `schema_version: 2`，之后每行一条记录。它适合后续用 Python、数据库或助手重新计算；直接导入 Excel 前通常需要先转换。
+`export` 导出 JSONL：每行一个 JSON 对象。第一行是文件说明，当前 `schema_version: 3`，之后每行一条记录。它适合后续用 Python、数据库或助手重新计算；直接导入 Excel 前通常需要先转换。
 
 先创建一个导出文件夹：
 
@@ -299,3 +299,15 @@ sqlite3 "$HOME/.codex-usage-ledger/usage.db" ".backup '$HOME/Downloads/codex-led
 ## 旧账本修复
 
 更新程序再 `sync` 不等于修复历史归因。使用 [隔离修复说明](REPAIR.md) 生成备份和修复预览。父记录未到的 legacy 候选保留并标为待核对，不计入确认用量。缺源历史继续保留，以 `repair_status: source_unavailable` 标记；汇总同时给出缺源记录数和 Token，不能据此声称归因已重新验证。
+
+## 账号边界、官方可用状态与最近历史（v0.4.4）
+
+`status` 和 `quota` 分开显示「普通用量」及「支出控制」：普通用量取官方 `ordinaryUsageAllowed`，支出控制取 `spendControlReached`。字段缺失为未知；剩余百分比、credits余额或重置时间不替代官方许可。每项附来源与采样时间，旧快照不代表当前实时许可。
+
+额度响应的 `accountId` 以命名空间哈希引用保存为后台账号范围。工作区及实际计费来源没有独立证据时标为 `partial`；全缺失为 `unknown`，冲突为 `mixed`。plan、cwd、相同周期、`normalModelSlug` 或当前登录账号不能补齐这些身份。线程的 `creator_account_id` 只描述创建时账号，恢复线程后不会更新，不能给后来调用追溯归属。旧原始事实不改写。
+
+本地记录与账号及具体窗口没有直接计费证据时，窗口的匹配 Token 为0，未分配用量另列；0表示「没有已证明匹配的记录」，不表示实际消耗为零。默认容量及显式实验都保留未知容量和严格原因。不同账号、缺失/冲突身份、不同来源或不同窗口不能拼成实验样本。既有历史派生值继续保留在 `estimate-history`。
+
+`status` 的 `workload` 和 `estimate --details` 独立列出滚动最近7天、30天及当前周期时间范围内的**本地历史**。查询从这些范围起点的并集读取，短周期不截断历史；每段单独计算模型、速度、缓存和Token构成。范围包含起点及 `as_of`，结束界为 `as_of+1ms`；时区随配置。`coverage.status=partial_observed_history` 表示仅覆盖已记录事实，不能从首末记录推断连续完整采集。周期时间内的本地活动没有自动分配到该额度窗口，重叠范围不能相加。
+
+日报保留每天、模型和周期十列表，模型额度分配与容量未知时用「—」；整体说明保留严格原因。JSONL新增scope/availability/证据引用和范围口径，schema_version为3。私人原响应及旧金额/价格引用留在SQLite，导出隐去原账号、工作区、用户ID和email，仅输出归一化哈希引用。

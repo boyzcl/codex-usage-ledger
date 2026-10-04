@@ -3,6 +3,7 @@ import {createInterface} from 'node:readline';
 import {mkdirSync,symlinkSync,existsSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
 import type {Config} from './types.js';
+import {officialSnapshot} from './quota-policy.js';
 import {normalizeQuota} from './quota.js';
 import type {Ledger} from './store.js';
 export class AppServer {
@@ -29,7 +30,7 @@ export class AppServer {
    const m=JSON.parse(line);const p=this.pending.get(m.id);if(!p)return;clearTimeout(p.timer);this.pending.delete(m.id);
    if(m.error)p.reject(Error('rpc_error_'+String(m.error.code)));else p.resolve(m.result);
   }catch{/* Malformed or unrelated notifications never enter the ledger. */}});
-  try{await this.request('initialize',{clientInfo:{name:'codex_usage_ledger',version:'0.4.2'},capabilities:{experimentalApi:true}});child.stdin.write(JSON.stringify({method:'initialized'})+'\n');}catch(e){this.close();throw e;}
+  try{await this.request('initialize',{clientInfo:{name:'codex_usage_ledger',version:'0.4.4'},capabilities:{experimentalApi:true}});child.stdin.write(JSON.stringify({method:'initialized'})+'\n');}catch(e){this.close();throw e;}
  }
  request(method:string,params?:unknown):Promise<any>{
   if(!['initialize','account/read','account/rateLimits/read','account/usage/read'].includes(method))return Promise.reject(Error('rpc_not_allowlisted'));
@@ -53,9 +54,9 @@ export async function collectAccount(db:Ledger,client:Pick<AppServer,'start'|'re
    // Account identity is projected; quota and usage responses contain numeric account facts.
    const raw=method==='account/read'?{type:r?.account?.type??null,plan:r?.account?.planType??null}:r;
    db.transaction(()=>{
-    db.observe('app_server',method,'ok',{started_at,response:raw},timestamp);
+    const observation=db.observe('app_server',method,'ok',{started_at,response:raw},timestamp);
     if(method==='account/read')db.set('account',{...raw,timestamp});
-    if(method==='account/rateLimits/read')for(const q of normalizeQuota(r,timestamp,'app_server'))db.insertQuota(q);
+    if(method==='account/rateLimits/read'){for(const q of normalizeQuota(r,timestamp,'app_server')){if(q.context?.evidence)q.context.evidence.observation_ids=[observation];db.insertQuota(q);}const snapshot=officialSnapshot(r,timestamp);snapshot.evidence!.observation_ids=[observation];for(const b of snapshot.buckets)b.evidence!.observation_ids=[observation];db.set('official_availability',snapshot);}
     if(method==='account/usage/read')db.insertAccount(timestamp,r);
     db.set('collection:'+method,{timestamp,status:'ok'});
    });state[method]='ok';

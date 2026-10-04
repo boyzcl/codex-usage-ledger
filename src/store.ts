@@ -1,6 +1,7 @@
 import {DatabaseSync} from './sqlite.js';
 import {tokenFields,type Usage,type Quota,type PriceRule,type ParseState} from './types.js';
-import {hash} from './quota.js';
+import {hash,normalizeQuota,legacyQuotaId} from './quota.js';
+import {quotaContext,quotaCycleKey,scopeKey,redactIdentity,officialSnapshot,recoveredContext,mergeContexts,type QuotaContext} from './quota-policy.js';
 import {sameFacts,sameContext,authorityUpgrade,contextKeys,usageDecision,type UsageIntent} from './usage-policy.js';
 import {priceUsage} from './pricing.js';
 export class Ledger {
@@ -13,6 +14,7 @@ export class Ledger {
    CREATE INDEX IF NOT EXISTS usage_thread_turn ON usage_records(thread_id,turn_id);
    CREATE INDEX IF NOT EXISTS usage_exact_scope ON usage_records(thread_id,turn_id) WHERE source='token_usage_record';
    CREATE TABLE IF NOT EXISTS quota_snapshots(id TEXT PRIMARY KEY,timestamp TEXT,limit_id TEXT,slot TEXT,window_duration_mins INTEGER,resets_at INTEGER,used_percent REAL,source TEXT,raw_json TEXT);
+   CREATE TABLE IF NOT EXISTS quota_context(id TEXT PRIMARY KEY,context_json TEXT NOT NULL);
    CREATE INDEX IF NOT EXISTS quota_cycle ON quota_snapshots(limit_id,window_duration_mins,resets_at,timestamp);
    CREATE INDEX IF NOT EXISTS quota_latest ON quota_snapshots(limit_id,slot,timestamp DESC);
    CREATE TABLE IF NOT EXISTS account_usage_snapshots(id TEXT PRIMARY KEY,timestamp TEXT,raw_json TEXT);
@@ -42,13 +44,14 @@ export class Ledger {
   if(!columns.includes('prefix_hash'))this.db.exec('ALTER TABLE ingest_files ADD COLUMN prefix_hash TEXT');
   if(!columns.includes('parser_version'))this.db.exec('ALTER TABLE ingest_files ADD COLUMN parser_version INTEGER');
   if(!columns.includes('ctime'))this.db.exec('ALTER TABLE ingest_files ADD COLUMN ctime REAL');
+  if(!this.get('quota_context_version'))this.transaction(()=>{this.recoverQuotaContexts();this.preserveEstimates('scope_migration');this.set('quota_context_version',1);});
  }
  close(){this.db.close();}
  transaction<T>(f:()=>T):T{this.db.exec('BEGIN IMMEDIATE');try{const value=f();this.db.exec('COMMIT');return value;}catch(e){this.db.exec('ROLLBACK');throw e;}}
  set(key:string,value:unknown){this.db.prepare('INSERT OR REPLACE INTO settings VALUES (?,?)').run(key,JSON.stringify(value));}
  get<T>(key:string):T|null{const r=this.db.prepare('SELECT value FROM settings WHERE key=?').get(key);return r?JSON.parse(r.value as string):null;}
  observe(source:string,kind:string,status:string,raw:unknown,timestamp=new Date().toISOString()){
-  this.db.prepare('INSERT INTO observations(timestamp,source,kind,status,raw_json) VALUES (?,?,?,?,?)').run(timestamp,source,kind,status,JSON.stringify(raw));
+  return Number(this.db.prepare('INSERT INTO observations(timestamp,source,kind,status,raw_json) VALUES (?,?,?,?,?)').run(timestamp,source,kind,status,JSON.stringify(raw)).lastInsertRowid);
  }
  markExact(thread:string,turn:string){if(turn)this.db.prepare('INSERT OR IGNORE INTO exact_turns VALUES (?,?)').run(thread,turn);}
  linkExact(legacy:string,response:string){this.db.prepare('INSERT OR IGNORE INTO exact_legacy_links VALUES (?,?)').run(legacy,response);}
@@ -107,7 +110,34 @@ export class Ledger {
   if(row.source==='token_usage_record'&&row.turn_id)this.markExact(row.thread_id,row.turn_id);
   return !saved;
  }
- insertQuota(q:Quota){this.db.prepare('INSERT OR IGNORE INTO quota_snapshots VALUES (?,?,?,?,?,?,?,?,?)').run(q.id,q.timestamp,q.limit_id,q.slot,q.window_duration_mins,q.resets_at,q.used_percent,q.source,q.raw_json);}
+ insertQuota(q:Quota){
+  const legacy=q.context?this.db.prepare('SELECT * FROM quota_snapshots WHERE id=?').get(legacyQuotaId(q)):undefined;
+  if(legacy&&q.context&&legacy.id!==q.id){const old=this.quotaProjection(legacy as unknown as Quota);
+   if(scopeKey(quotaContext(old).scope)===scopeKey(q.context.scope)&&['timestamp','limit_id','slot','window_duration_mins','resets_at','used_percent','source','raw_json'].every(k=>legacy[k]===q[k as keyof Quota]))q={...q,id:old.id};
+  }
+  this.db.prepare('INSERT OR IGNORE INTO quota_snapshots VALUES (?,?,?,?,?,?,?,?,?)').run(q.id,q.timestamp,q.limit_id,q.slot,q.window_duration_mins,q.resets_at,q.used_percent,q.source,q.raw_json);if(q.context)this.saveQuotaContext(q.id,q.context);}
+ private saveQuotaContext(id:string,context:QuotaContext){
+  const prior=this.db.prepare('SELECT context_json FROM quota_context WHERE id=?').get(id);
+  context=mergeContexts(prior?JSON.parse(prior.context_json as string):undefined,context);
+  this.db.prepare('INSERT OR REPLACE INTO quota_context VALUES (?,?)').run(id,JSON.stringify(context));
+ }
+ private recoverQuotaContexts(){
+  const observations=this.db.prepare("SELECT id,timestamp,raw_json FROM observations WHERE source='app_server' AND kind='account/rateLimits/read' AND status='ok' ORDER BY timestamp,id").all();
+  let latest:ReturnType<typeof officialSnapshot>|undefined;
+  for(const ob of observations){const response=JSON.parse(ob.raw_json as string).response;if(!response)continue;
+   for(const q of normalizeQuota(response,ob.timestamp as string,'app_server')){
+    const old=this.db.prepare('SELECT * FROM quota_snapshots WHERE id=?').get(legacyQuotaId(q));
+    if(old&&['timestamp','limit_id','slot','window_duration_mins','resets_at','used_percent','source','raw_json'].every(k=>old[k]===q[k as keyof Quota])&&q.context)this.saveQuotaContext(old.id as string,recoveredContext(q.context,Number(ob.id)));
+   }
+   const snapshot=officialSnapshot(response,ob.timestamp as string);const recovered=recoveredContext(snapshot,Number(ob.id));
+   const previous=latest?.availability.sampled_at===ob.timestamp?latest:undefined;
+   const context=mergeContexts(previous,recovered);
+   latest={...snapshot,...context,buckets:snapshot.buckets.map(b=>({...b,...mergeContexts(previous?.buckets.find(p=>p.limit_id===b.limit_id),recoveredContext(b,Number(ob.id)))}))};
+  }
+  if(latest)this.set('official_availability',latest);
+ }
+ quotaProjection(q:Quota):Quota {const meta=this.db.prepare('SELECT context_json FROM quota_context WHERE id=?').get(q.id);return {...q,context:meta?JSON.parse(meta.context_json as string):quotaContext(q)};}
+ quotaOutput(q:Quota){const projected=this.quotaProjection(q);const {raw_json,...row}=projected;return {...row,raw:redactIdentity(JSON.parse(raw_json))};}
  insertAccount(timestamp:string,raw:unknown){this.db.prepare('INSERT OR REPLACE INTO account_usage_snapshots VALUES (?,?,?)').run(hash([timestamp,raw]),timestamp,JSON.stringify(raw));}
  issue(path:string,offset:number,code:string,timestamp:string|null){this.db.prepare('INSERT OR IGNORE INTO ingest_issues VALUES (?,?,?,?,?)').run(hash([path,offset,code]),hash(path),offset,code,timestamp);}
  checkpoint(path:string):any{return this.db.prepare('SELECT * FROM ingest_files WHERE path=?').get(path);}
@@ -174,14 +204,15 @@ export class Ledger {
   const latest=this.get<unknown[]>('latest_estimates');if(latest?.length)this.db.prepare('INSERT OR IGNORE INTO capacity_estimate_history VALUES (?,?,?,?,?)').run(hash(['latest_estimates',latest]),'latest_estimates',new Date().toISOString(),status,JSON.stringify(latest));
  }
  records(from='0000',to='9999'):Usage[]{return this.db.prepare('SELECT raw_json FROM usage_records WHERE timestamp>=? AND timestamp<? ORDER BY timestamp').all(from,to).map(x=>JSON.parse(x.raw_json as string));}
- officialQuotas(from='0000',to='9999'):Quota[]{return this.db.prepare("SELECT * FROM quota_snapshots WHERE source='app_server' AND timestamp>=? AND timestamp<? ORDER BY timestamp").all(from,to) as unknown as Quota[];}
- quotas():Quota[]{return this.db.prepare('SELECT * FROM quota_snapshots ORDER BY timestamp,source').all() as unknown as Quota[];}
- latestQuota():Quota[]{
-  const rows=this.db.prepare(`SELECT q.* FROM quota_snapshots q JOIN (SELECT limit_id,slot,MAX(timestamp) AS latest FROM quota_snapshots GROUP BY limit_id,slot) t ON q.limit_id=t.limit_id AND q.slot=t.slot AND q.timestamp=t.latest`).all() as unknown as Quota[];
-  const bucketTime=new Map<string,string>();for(const r of rows)if(r.timestamp>(bucketTime.get(r.limit_id)??''))bucketTime.set(r.limit_id,r.timestamp);
-  return rows.filter(r=>r.timestamp===bucketTime.get(r.limit_id)&&(r.resets_at===null||r.resets_at>Date.now()/1000));
+ officialQuotas(from='0000',to='9999'):Quota[]{return (this.db.prepare("SELECT * FROM quota_snapshots WHERE source='app_server' AND timestamp>=? AND timestamp<? ORDER BY timestamp").all(from,to) as unknown as Quota[]).map(q=>this.quotaProjection(q));}
+ quotas():Quota[]{return (this.db.prepare('SELECT * FROM quota_snapshots ORDER BY timestamp,source').all() as unknown as Quota[]).map(q=>this.quotaProjection(q));}
+ latestQuota(asOf=new Date().toISOString()):Quota[]{
+  const official=this.get<{availability:{sampled_at:string}}>('official_availability');
+  const timestamp=official?.availability.sampled_at&&official.availability.sampled_at<=asOf?official.availability.sampled_at:this.db.prepare("SELECT MAX(timestamp) AS latest FROM quota_snapshots WHERE source='app_server' AND timestamp<=?").get(asOf)?.latest;
+  const rows=timestamp?this.db.prepare("SELECT * FROM quota_snapshots WHERE source='app_server' AND timestamp=?").all(timestamp):this.db.prepare('SELECT * FROM quota_snapshots WHERE timestamp=(SELECT MAX(timestamp) FROM quota_snapshots WHERE timestamp<=?)').all(asOf);
+  return (rows as unknown as Quota[]).filter(q=>q.resets_at===null||q.resets_at>Date.parse(asOf)/1000).map(q=>this.quotaProjection(q));
  }
- cycleQuotas(cycles:Quota[]):Quota[]{return cycles.flatMap(q=>this.db.prepare('SELECT * FROM quota_snapshots WHERE limit_id=? AND slot=? AND window_duration_mins=? AND resets_at=? ORDER BY timestamp').all(q.limit_id,q.slot,q.window_duration_mins,q.resets_at)) as unknown as Quota[];}
+ cycleQuotas(cycles:Quota[]):Quota[]{return cycles.flatMap(q=>(this.db.prepare('SELECT * FROM quota_snapshots WHERE source=? AND limit_id=? AND slot=? AND window_duration_mins=? AND resets_at=? ORDER BY timestamp').all(q.source,q.limit_id,q.slot,q.window_duration_mins,q.resets_at) as unknown as Quota[]).map(r=>this.quotaProjection(r)).filter(r=>quotaCycleKey(r)===quotaCycleKey(q)));}
 
  latestAccount():any{const r=this.db.prepare('SELECT timestamp,raw_json FROM account_usage_snapshots ORDER BY timestamp DESC LIMIT 1').get();return r?{timestamp:r.timestamp,...JSON.parse(r.raw_json as string)}:null;}
  savePrices(rules:PriceRule[]){for(const r of rules){const old=this.db.prepare('SELECT raw_json FROM pricing_rules WHERE id=?').get(r.id);if(old&&old.raw_json!==JSON.stringify(r))throw Error('immutable_price_rule_changed');this.db.prepare('INSERT OR IGNORE INTO pricing_rules VALUES (?,?)').run(r.id,JSON.stringify(r));}}
