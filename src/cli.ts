@@ -1,6 +1,7 @@
 import {currentWorkload} from './workload.js';
 import {quotaContext} from './quota-policy.js';
 import {capacityView} from './capacity-policy.js';
+import {capacityDiagnostics} from './capacity-diagnostics.js';
 import {parseArgs} from 'node:util';
 import {homedir} from 'node:os';
 import {join,resolve} from 'node:path';
@@ -90,6 +91,7 @@ async function main(){
  const client=new AppServer(config,home);db.savePrices(rules);
  const show=(value:unknown)=>console.log(opts.values.json?JSON.stringify(value,null,2):format(value,{...view,collection:db.get('collection:account/rateLimits/read')}));
  let current:ReturnType<typeof currentWorkload>|undefined;
+ let diagnostic:ReturnType<typeof capacityDiagnostics>|undefined;
  let asOf=new Date().toISOString();
  function currentData(){return current??=currentWorkload(db,db.latestQuota(asOf),asOf,config.timezone);}
  function empiricalCurrent(){
@@ -97,7 +99,7 @@ async function main(){
   const prices=db.rules();const rows=data.rows.map(r=>({...priceUsage({...r,timestamp:asOf},prices),timestamp:r.timestamp}));
   return empiricalPlans(rows,db.officialQuotas(range.from,range.to_exclusive),range).filter(p=>latest.some(q=>cycleKey(q)===p.cycle));
  }
- function withEmpirical(caps:any[]){const empirical=opts.values['experimental-empirical']?empiricalCurrent():[];return caps.map(c=>({...capacityView(c),status:opts.values['experimental-empirical']?'experimental_unverified':'unverified',experimental:!!opts.values['experimental-empirical'],estimated_capacity:null,lower_bound:null,upper_bound:null,equivalents:{},strict_reason:c.strict_reason??c.reason??'unverified_account_window_attribution',reason:c.reason??'unverified_account_window_attribution',empirical:empirical.map(p=>capacityView({...p,strict_reason:p.attribution_reason??'unverified_account_window_attribution'},true)).find(p=>p.cycle===c.cycle)??null}));}
+ function withEmpirical(caps:any[]){const empirical=opts.values['experimental-empirical']?empiricalCurrent():[];if(caps.length)diagnostic??=capacityDiagnostics(db,db.latestQuota(asOf),asOf,config,home);return caps.map(c=>({...capacityView(c),status:opts.values['experimental-empirical']?'experimental_unverified':'unverified',experimental:!!opts.values['experimental-empirical'],estimated_capacity:null,lower_bound:null,upper_bound:null,equivalents:{},strict_reason:c.strict_reason??c.reason??'unverified_account_window_attribution',reason:c.reason??'unverified_account_window_attribution',empirical:empirical.map(p=>capacityView({...p,strict_reason:p.attribution_reason??'unverified_account_window_attribution'},true)).find(p=>p.cycle===c.cycle)??null,diagnostics:diagnostic}));}
  function estimates(){
   const latest=db.latestQuota(asOf),data=currentData();
   const result=quotaEstimates(db.cycleQuotas(latest),data.rows,config,db.rules(),asOf).map(r=>({...r,workload:{as_of:asOf,query:data.view.query,windows:data.view.windows.filter(w=>w.name==='last_7_days'||w.name==='last_30_days'||w.name===r.cycle)}}));

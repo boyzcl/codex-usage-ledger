@@ -133,6 +133,27 @@ export function format(value:any,options:DisplayOptions={}):string {
   for(const q of [...warnings,...dedup]){const description=issues[q.code];pair(description?.[0]??'其他数据问题',exact(q.count)+' 次');add(description?.[1]??'请结合问题代码核对日志。',2);if(details)pair('问题代码',q.code);}
   if(list.length)add('以上为累计事件数，不等于缺失 Token 数，也不表示当前采集失败。',2);
  }
+ function diagnosticView(d:any){
+  if(!d)return;section('容量证据 · 资格与覆盖');
+  add('以下为观测诊断；不会放行容量或把用户声明补为请求归属。',2);
+  for(const w of d.windows??[]){
+   add(`${safe(w.limit_id)} · ${safe(w.slot)} · 截止 ${w.resets_at?stamp(new Date(w.resets_at*1000).toISOString()):'未知'}`,1);
+   pair('账号证据',({verified_quota_scope:'额度身份已核实',observed_account_only:'仅观测到后台账号',conflicting_identity:'身份冲突',unknown_identity:'未知'} as any)[w.evidence_level]??'未知');
+   pair('观测起止',stamp(w.coverage?.observed_from)+' → '+stamp(w.coverage?.observed_to));
+   pair('额度观测点',exact(w.point_count));pair('研究输入合格 / 拒绝区间',exact(w.eligible_span_count)+' / '+exact(w.rejected_span_count));
+   pair('已证明匹配 Token',num(w.matched_tokens));pair('未归属本地 Token',num(w.unallocated_local_tokens));pair('未知速度 Token',num(w.local_composition?.unknown_speed_tokens));
+   pair('观测空档',exact(w.gaps?.length)+' 个');pair('完整周期验收',w.coverage?.complete_cycle_verified?'通过':'未通过');
+   for(const [code,count] of Object.entries(w.rejection_counts??{}))add(`拒绝 ${safe(code)}：${exact(count)} 个区间`,33);
+  }
+  for(const r of d.reset_candidates??[])add((r.kind==='deadline_jitter_candidate'?'截止时间抖动候选，未合并周期':'重置或窗口变更候选，原因待核实')+'：'+stamp(r.from)+' → '+stamp(r.to),33);
+  pair('官方与本地差额',d.account_daily?.local_official_difference==null?'未知':num(d.account_daily.local_official_difference));
+  add('官方日桶日界与账号归属未核实，上报延迟无保证；修订不等于即时外部消耗。',2);
+  pair('已观察修订日期',exact(d.account_daily?.revised_days?.length));
+  section('每日采集 · 已查询范围');
+  for(const day of d.runtime_daily?.days??[])add(`${safe(day.date)}：本地成功 ${exact(day.local_ok)} / 失败 ${exact(day.local_error)}；额度成功 ${exact(day.quota_ok)} / 失败 ${exact(day.quota_error)}；已报告空档 ${exact(day.reported_gap_events)}`);
+  if(d.query?.cycle_query_clipped||d.query?.quota_truncated||d.query?.observations_truncated||d.account_daily?.truncated)add('查询范围或样本数量已截取；不能视为完整覆盖。',33);
+  if(d.storage_snapshot){section('运行空间 · 当前文件');pair('文件采样时间',stamp(d.storage_snapshot.sampled_at));for(const f of d.storage_snapshot.files??[])pair(safe(f.name),f.bytes==null?'未知（未取得文件）':exact(f.bytes)+' bytes');pair('每日增长','未知；需要独立每日快照');}
+ }
  function modelTable(report:any){
   section('模型消耗排行');const all=(Object.entries(report.models??{}) as [string,any][]).sort((a,b)=>b[1].total_tokens-a[1].total_tokens);const top=details?all:all.slice(0,5);
   if(!top.length){add('此范围内暂无模型用量。');return;}
@@ -223,7 +244,7 @@ export function format(value:any,options:DisplayOptions={}):string {
   if(value.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(value.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
   if(value.today?.totals?.source_unavailable_tokens)add('今日含缺源历史 Token：'+num(value.today.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);
   workload(value.workload);section('采集状态');monitor(value.monitor,value.last_sync);add();capacity(value.capacity??[],true);quality(value.issues??[]);
-  if(details){section('账户总量核对');pair('本地累计 Token',num(value.account_cross_check?.local_tokens));pair('官方累计 Token',num(value.account_cross_check?.official_lifetime_tokens));pair('本地减官方',num(value.account_cross_check?.difference));pair('官方汇总采集时间',stamp(value.account_cross_check?.official_observed_at));add('范围、保留期限和上报延迟不同，差额不能直接当作外部消耗。',2);modelTable(value.today);quality(value.issues??[],true);}
+  if(details){diagnosticView(value.capacity?.[0]?.diagnostics);section('账户总量核对');pair('本地累计 Token',num(value.account_cross_check?.local_tokens));pair('官方累计 Token',num(value.account_cross_check?.official_lifetime_tokens));pair('本地减官方',num(value.account_cross_check?.difference));pair('官方汇总采集时间',stamp(value.account_cross_check?.official_observed_at));add('范围、保留期限和上报延迟不同，差额不能直接当作外部消耗。',2);modelTable(value.today);quality(value.issues??[],true);}
   else{add();add('更多明细：cux status --details',2);}
  }else if(['today','week','month','report','models'].includes(command)){
   title(({today:'今日用量',week:'本周用量',month:'本月用量',report:'区间用量',models:'模型用量 · 全部已入账历史'} as any)[command]);
@@ -235,7 +256,7 @@ export function format(value:any,options:DisplayOptions={}):string {
   officialAvailability(value.official_availability);if(value.daily){dailyTable(value);if(details){section('用量合计 · 精确口径');tokens(value.totals);valuation(value.current_price_valuation,value.totals);}}else{section('用量合计');tokens(value.totals);valuation(value.current_price_valuation,value.totals);modelTable(value);}
   if(!details){add();add(`精确数字与完整明细：cux ${command} --details${command==='report'?'（沿用日期参数）':''}`,2);}
  }else if(command==='quota'){title('Codex 额度');officialAvailability(value.official_availability);quotas(value.windows??[]);if(details){section('采集状态');monitor(value.monitor);collection(value.collection);}}
- else if(command==='estimate'){title('套餐容量推算');capacity(Array.isArray(value)?value:[]);if(!details){add();add('详细依据：cux estimate --details',2);}}
+ else if(command==='estimate'){title('套餐容量推算');capacity(Array.isArray(value)?value:[]);if(details)diagnosticView(value?.[0]?.diagnostics);if(!details){add();add('详细依据：cux estimate --details',2);}}
  else if(command==='doctor'){
   title('账本诊断');section('当前检查');add(value.ok?'✓ 本次基础检查通过':'! 本次检查发现异常',value.ok?32:33);
   const names:Record<string,string>={sqlite:'数据库完整性',source_exists:'源目录存在',pricing_rules_valid:'价格规则格式',readonly_collector_supported:'只读在线采集支持',sync_completed:'已有同步记录'};
