@@ -2,7 +2,7 @@ import {statSync} from 'node:fs';
 import {join} from 'node:path';
 import type {Ledger} from './store.js';
 import type {Quota,Usage,Config} from './types.js';
-import {quotaContext,scopeKey,scopeReason,attributedTo} from './quota-policy.js';
+import {quotaContext,scopeKey,scopeReason,attributedTo,contextFingerprint,mergeContexts} from './quota-policy.js';
 import {mode} from './pricing.js';
 import {localDay} from './report.js';
 
@@ -26,12 +26,25 @@ export function windowDiagnostics(quotas:Quota[],usage:Usage[],asOf:string,thres
  const groups=new Map<string,Quota[]>();
  for(const q of quotas){if(q.timestamp>asOf)continue;const key=diagnosticSeriesKey(q);if(!groups.has(key))groups.set(key,[]);groups.get(key)!.push(q);}
  return [...groups].sort(([a],[b])=>a.localeCompare(b)).map(([key,qs])=>{
-  const sorted=[...qs].sort((a,b)=>a.timestamp.localeCompare(b.timestamp)||a.id.localeCompare(b.id)),q=sorted[0],start=nominalStart(q),end=q.resets_at===null?null:q.resets_at*1000;
+  const sorted=[...qs].sort((a,b)=>a.timestamp.localeCompare(b.timestamp)||a.id.localeCompare(b.id)||contextFingerprint(quotaContext(a)).localeCompare(contextFingerprint(quotaContext(b)))),q=sorted[0],start=nominalStart(q),end=q.resets_at===null?null:q.resets_at*1000;
   const first=sorted[0].timestamp,last=sorted.at(-1)!.timestamp;
+  const scope=quotaContext(q).scope;
+  // The store can already quarantine a same-time context as mixed/unknown scope.
+  // Keep it as a rejection barrier in a potentially affected series, not as an
+  // attributed member; otherwise grouping would silently bridge that conflict.
+  const barriers=scope.account_ref?quotas.filter(r=>r.timestamp>=first&&r.timestamp<=last&&r.source===q.source&&r.limit_id===q.limit_id&&r.slot===q.slot&&r.window_duration_mins===q.window_duration_mins&&r.resets_at===q.resets_at&&diagnosticSeriesKey(r)!==key&&scopeReason(r)!==null&&(!quotaContext(r).scope.account_ref||quotaContext(r).scope.account_ref===scope.account_ref)):[];
+  const timeline=[...sorted,...barriers].sort((a,b)=>a.timestamp.localeCompare(b.timestamp)||a.id.localeCompare(b.id)||contextFingerprint(quotaContext(a)).localeCompare(contextFingerprint(quotaContext(b))));
   const local=usage.filter(r=>start!==null&&end!==null&&Date.parse(r.timestamp)>=start&&Date.parse(r.timestamp)<end&&r.timestamp<=asOf);
   const matched=local.filter(r=>attributedTo(r,q)),identityReason=scopeReason(q);
-  const points:Quota[]=[];let conflicting=0;
-  for(const stamp of unique(sorted.map(r=>r.timestamp))){const at=sorted.filter(r=>r.timestamp===stamp);if(new Set(at.map(r=>r.used_percent)).size>1){conflicting++;points.push({...at[0],used_percent:NaN});}else points.push(at[0]);}
+  const points:Quota[]=[];let conflicting=0;const pointConflicts=new Map<string,string[]>();
+  for(const stamp of unique(timeline.map(r=>r.timestamp))){
+   const at=timeline.filter(r=>r.timestamp===stamp),codes:string[]=[];
+   if(barriers.some(r=>r.timestamp===stamp))codes.push('ambiguous_quota_identity');
+   if(new Set(at.map(r=>r.used_percent)).size>1)codes.push('conflicting_percent_values');
+   if(new Set(at.map(r=>contextFingerprint(quotaContext(r)))).size>1)codes.push('conflicting_quota_contexts');
+   if(new Set(at.map(r=>quotaContext(r).availability.ordinary_usage_allowed)).size>1)codes.push('conflicting_permission_states');
+   if(codes.length){conflicting++;pointConflicts.set(stamp,codes);let context=quotaContext(at[0]);for(const r of at.slice(1))context=mergeContexts(context,quotaContext(r));points.push({...at[0],used_percent:NaN,context});}else points.push(at[0]);
+  }
   const numericalGaps=gaps(points,thresholdSeconds),observedGaps=reported.filter(g=>g.from<last&&g.to>first);
   const spans:{from:string;to:string;from_snapshot_id:string;to_snapshot_id:string;delta_pp:number|null;local_tokens:number;matched_tokens:number;local_composition:ReturnType<typeof composition>;eligible_for_conditional_research:boolean;reasons:string[]}[]=[];
   let anchor:Quota|undefined;
@@ -39,11 +52,15 @@ export function windowDiagnostics(quotas:Quota[],usage:Usage[],asOf:string,thres
    const rows=local.filter(r=>r.timestamp>a.timestamp&&r.timestamp<=b.timestamp),allocated=rows.filter(r=>attributedTo(r,q)),mix=composition(rows),delta=b.used_percent-a.used_percent;
    const reasons=[...extra,...(identityReason?[identityReason]:[])];
    if(q.source!=='app_server')reasons.push('non_official_quota_source');
-   const permission=[quotaContext(a).availability.ordinary_usage_allowed,quotaContext(b).availability.ordinary_usage_allowed];
+   const chain=points.filter(p=>p.timestamp>=a.timestamp&&p.timestamp<=b.timestamp);
+   const permission=chain.map(p=>quotaContext(p).availability.ordinary_usage_allowed);
    if(permission.some(v=>v!==true))reasons.push('ordinary_usage_permission_unverified_or_blocked');
-   if(permission[0]!==permission[1])reasons.push('official_permission_change');
+   if(permission.some((v,i)=>i>0&&v!==permission[i-1]))reasons.push('official_permission_change');
+   if(chain.some((p,i)=>i>0&&p.used_percent<chain[i-1].used_percent))reasons.push('percent_decrease');
+   if(chain.some(p=>!Number.isFinite(p.used_percent)))reasons.push('conflicting_snapshots');
+   reasons.push(...chain.flatMap(p=>pointConflicts.get(p.timestamp)??[]));
    if(start===null||end===null||Date.parse(a.timestamp)<start||Date.parse(b.timestamp)>=end)reasons.push('invalid_window_boundaries');
-   if(a.used_percent<=0||b.used_percent>=100)reasons.push('clipped_endpoint');
+   if(chain.some(p=>p.used_percent<=0||p.used_percent>=100))reasons.push('clipped_endpoint');
    if(!Number.isFinite(delta))reasons.push('conflicting_snapshots');else if(delta<5)reasons.push(delta<0?'percent_decrease':'small_percent_change');
    if(!allocated.length)reasons.push('no_matched_tokens');
    if(rows.some(r=>!r.quota_attribution||r.quota_attribution.source!=='source_event'))reasons.push('unverified_local_account_window_attribution');
@@ -55,23 +72,28 @@ export function windowDiagnostics(quotas:Quota[],usage:Usage[],asOf:string,thres
    if([...numericalGaps,...observedGaps].some(g=>g.from<b.timestamp&&g.to>a.timestamp))reasons.push('observation_gap');
    const codes=unique(reasons);return {from:a.timestamp,to:b.timestamp,from_snapshot_id:a.id,to_snapshot_id:b.id,delta_pp:Number.isFinite(delta)?delta:null,local_tokens:mix.total_tokens,matched_tokens:allocated.reduce((n,r)=>n+r.total_tokens,0),local_composition:mix,eligible_for_conditional_research:!codes.length,reasons:codes};
   };
-  for(const p of points){
-   if(!Number.isFinite(p.used_percent)){if(anchor)spans.push(span(anchor,p));anchor=undefined;continue;}
+  for(const [i,p] of points.entries()){
+   const previous=points[i-1];
+   // A bad point/adjacent edge ends the current run. Preserve rejected boundaries,
+   // then start a fresh run only at a subsequent allowed, unambiguous point.
+   if(!Number.isFinite(p.used_percent)||quotaContext(p).availability.ordinary_usage_allowed!==true){spans.push(span(anchor??previous??p,p));anchor=undefined;continue;}
+   if(previous&&(!Number.isFinite(previous.used_percent)||quotaContext(previous).availability.ordinary_usage_allowed!==true)){spans.push(span(previous,p));anchor=p;continue;}
+   if(previous&&p.used_percent<previous.used_percent){spans.push(span(anchor??previous,p));anchor=p;continue;}
    if(!anchor){anchor=p;continue;}
    const delta=p.used_percent-anchor.used_percent;
-   if(delta<0||delta>=5){spans.push(span(anchor,p));anchor=p;}
+   if(delta>=5){spans.push(span(anchor,p));anchor=p;}
   }
   if(anchor&&anchor.timestamp!==last)spans.push(span(anchor,points.at(-1)!));
   const reasons:Record<string,number>={};for(const s of spans)for(const reason of s.reasons)reasons[reason]=(reasons[reason]??0)+1;
-  const scope=quotaContext(q).scope;
   return {key,source:q.source,limit_id:q.limit_id,slot:q.slot,window_duration_mins:q.window_duration_mins,resets_at:q.resets_at,scope,
    evidence_level:scope.status==='verified'?'verified_quota_scope':scope.account_ref?'observed_account_only':scope.status==='mixed'?'conflicting_identity':'unknown_identity',statement_evidence:[] as unknown[],
    identity_reason:identityReason,scope_evidence:quotaContext(q).evidence??null,
    coverage:{status:'partial_observations',nominal_from:start===null?null:iso(start),nominal_to:end===null?null:iso(end),observed_from:first,observed_to:last,cycle_elapsed:end===null?null:Date.parse(asOf)>=end,unobserved_start_seconds:start===null?null:Math.max(0,(Date.parse(first)-start)/1000),last_sample_age_seconds:Math.max(0,(Date.parse(asOf)-Date.parse(last))/1000),complete_cycle_verified:false,note:'Samples do not establish continuous collection, account completeness or a verified reset operation.'},
    point_count:points.length,conflicting_timestamp_count:conflicting,clipped_point_count:points.filter(p=>p.used_percent===0||p.used_percent===100).length,
-   point_evidence:points.map(p=>({timestamp:p.timestamp,snapshot_ids:sorted.filter(r=>r.timestamp===p.timestamp).map(r=>r.id),used_percent:Number.isFinite(p.used_percent)?p.used_percent:null,observation_ids:[...new Set(sorted.filter(r=>r.timestamp===p.timestamp).flatMap(r=>quotaContext(r).evidence?.observation_ids??[]))].sort((a,b)=>a-b)})),
+   own_scope_point_count:unique(sorted.map(r=>r.timestamp)).length,identity_barrier_count:unique(barriers.map(r=>r.timestamp)).length,identity_barriers_are_attributed_members:false,
+   point_evidence:points.map(p=>({timestamp:p.timestamp,snapshot_ids:unique(timeline.filter(r=>r.timestamp===p.timestamp).map(r=>r.id)),used_percent:Number.isFinite(p.used_percent)?p.used_percent:null,ordinary_usage_allowed:quotaContext(p).availability.ordinary_usage_allowed,conflict_reasons:pointConflicts.get(p.timestamp)??[],context_refs:unique(timeline.filter(r=>r.timestamp===p.timestamp).flatMap(r=>{const ctx=quotaContext(r);return ctx.evidence?.context_refs.length?ctx.evidence.context_refs:[contextFingerprint(ctx)];})),observation_ids:[...new Set(timeline.filter(r=>r.timestamp===p.timestamp).flatMap(r=>quotaContext(r).evidence?.observation_ids??[]))].sort((a,b)=>a-b)})),
    local_composition:composition(local),matched_records:matched.length,matched_tokens:matched.reduce((n,r)=>n+r.total_tokens,0),unallocated_local_tokens:local.filter(r=>!attributedTo(r,q)).reduce((n,r)=>n+r.total_tokens,0),
-   sample_definition:'nonoverlapping >=5pp spans plus rejected decreases/conflicts/trailing partial span; no pairwise sample inflation',eligible_span_count:spans.filter(s=>s.eligible_for_conditional_research).length,rejected_span_count:spans.filter(s=>!s.eligible_for_conditional_research).length,rejection_counts:reasons,spans,gaps:[...numericalGaps,...observedGaps],gap_threshold_seconds:thresholdSeconds,
+   sample_definition:'nonoverlapping >=5pp clean runs plus rejected decrease/permission/conflict boundaries and trailing partial spans; no pairwise sample inflation',eligible_span_count:spans.filter(s=>s.eligible_for_conditional_research).length,rejected_span_count:spans.filter(s=>!s.eligible_for_conditional_research).length,rejection_counts:reasons,spans,gaps:[...numericalGaps,...observedGaps],gap_threshold_seconds:thresholdSeconds,
    capacity_release:'not_authorized',note:'Eligible spans only describe research input quality. They do not verify weights, a target combination, external usage assumptions, held-out predictions or plan capacity.'};
  });
 }

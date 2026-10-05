@@ -61,6 +61,37 @@ test('D1 bucket revisions never become an instantaneous account residual or zero
  const daily=runtimeDailyDiagnostics([observation(1,first.timestamp,'local_sync'),observation(2,last.timestamp,'local_sync',{},'error'),observation(3,'2026-10-03T02:00:00.000Z','local_sync')],'UTC',900);
  assert.equal(daily.days[0].local_ok,2);assert.equal(daily.days[0].local_error,1);assert.equal(daily.intervals[0].gaps.length,1);
 });
+test('D1 adjacent rollback above the anchor rejects the whole run and permits a clean later run',()=>{
+ const qs=[first,quota('2026-10-03T01:01:00.000Z',13),quota('2026-10-03T01:02:00.000Z',12),last];
+ const rows=['2026-10-03T01:00:30.000Z','2026-10-03T01:01:30.000Z','2026-10-03T01:03:00.000Z','2026-10-03T01:06:00.000Z'].map(t=>attach(usage(t),first));
+ const rejected=windowDiagnostics(qs,rows,at,900)[0];assert.equal(rejected.eligible_span_count,0);assert.ok(rejected.spans.some(s=>s.from===first.timestamp&&s.to===qs[2].timestamp&&s.reasons.includes('percent_decrease')));
+ const recovered=windowDiagnostics([...qs,quota('2026-10-03T01:08:00.000Z',17)],rows,at,900)[0];assert.equal(recovered.eligible_span_count,1);const valid=recovered.spans.find(s=>s.eligible_for_conditional_research)!;assert.equal(valid.from,qs[2].timestamp);assert.equal(valid.to,'2026-10-03T01:08:00.000Z');assert.deepEqual(valid.reasons,[]);
+});
+test('D1 interior blocked or unknown permission rejects even with allowed endpoints, then recovers',()=>{
+ const rows=['2026-10-03T01:00:30.000Z','2026-10-03T01:03:00.000Z','2026-10-03T01:07:00.000Z'].map(t=>attach(usage(t),first));
+ for(const permission of [false,null]){
+  const middle=quota('2026-10-03T01:01:00.000Z',12);middle.context!.availability.ordinary_usage_allowed=permission;
+  const qs=[first,middle,last],d=windowDiagnostics(qs,rows,at,900)[0];assert.equal(d.eligible_span_count,0);assert.ok(d.spans.every(s=>!s.eligible_for_conditional_research));assert.ok(d.spans.some(s=>s.reasons.includes('official_permission_change')));assert.ok(d.spans.some(s=>s.from===middle.timestamp&&s.to===last.timestamp&&s.reasons.includes('ordinary_usage_permission_unverified_or_blocked')));
+  const recovered=windowDiagnostics([...qs,quota('2026-10-03T01:09:00.000Z',20)],rows,at,900)[0];assert.equal(recovered.eligible_span_count,1);assert.equal(recovered.spans.find(s=>s.eligible_for_conditional_research)!.from,last.timestamp);
+ }
+});
+test('D1 same-time permission conflict retains both context references, is order independent and recovers',()=>{
+ const good=quota('2026-10-03T01:01:00.000Z',12),bad=structuredClone(good);bad.context!.availability.ordinary_usage_allowed=false;
+ const rows=['2026-10-03T01:00:30.000Z','2026-10-03T01:03:00.000Z','2026-10-03T01:07:00.000Z'].map(t=>attach(usage(t),first));
+ const a=windowDiagnostics([first,good,bad,last],rows,at,900)[0],b=windowDiagnostics([last,bad,good,first],rows,at,900)[0];assert.deepEqual(a,b);assert.equal(a.eligible_span_count,0);assert.equal(a.conflicting_timestamp_count,1);assert.equal(a.point_evidence[1].context_refs.length,2);assert.equal(a.point_evidence[1].ordinary_usage_allowed,null);assert.ok(a.point_evidence[1].conflict_reasons.includes('conflicting_permission_states'));assert.ok(a.spans.some(s=>s.reasons.includes('conflicting_snapshots')));
+ const recovered=windowDiagnostics([first,good,bad,last,quota('2026-10-03T01:09:00.000Z',20)],rows,at,900)[0];assert.equal(recovered.eligible_span_count,1);assert.equal(recovered.spans.find(s=>s.eligible_for_conditional_research)!.from,last.timestamp);
+});
+test('D1 stored mixed context is a rejection barrier, not silently skipped or assigned to a known account',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'cux-D1-conflict-')),db=new Ledger(join(dir,'usage.db'));
+ try{
+  const good=quota('2026-10-03T01:01:00.000Z',12),bad=structuredClone(good);bad.context!.availability.ordinary_usage_allowed=false;
+  for(const q of [first,good,bad,last])db.insertQuota(q);
+  const points=db.quotas(),mixed=points.find(q=>q.timestamp===good.timestamp)!;assert.equal(quotaContext(mixed).scope.status,'mixed');assert.equal(quotaContext(mixed).scope.account_ref,null);
+  const rows=['2026-10-03T01:00:30.000Z','2026-10-03T01:03:00.000Z','2026-10-03T01:07:00.000Z'].map(t=>attach(usage(t),first));
+  const known=windowDiagnostics(points,rows,at,900).find(w=>w.scope.account_ref===quotaContext(first).scope.account_ref)!;assert.equal(known.eligible_span_count,0);assert.equal(known.own_scope_point_count,2);assert.equal(known.identity_barrier_count,1);assert.equal(known.identity_barriers_are_attributed_members,false);assert.equal(known.point_evidence[1].context_refs.length,2);assert.ok(known.spans.some(s=>s.reasons.includes('ambiguous_quota_identity')));
+  const recovered=windowDiagnostics([...points,quota('2026-10-03T01:09:00.000Z',20)],rows,at,900).find(w=>w.scope.account_ref===quotaContext(first).scope.account_ref)!;assert.equal(recovered.eligible_span_count,1);assert.equal(recovered.spans.find(s=>s.eligible_for_conditional_research)!.from,last.timestamp);
+ }finally{db.close();rmSync(dir,{recursive:true,force:true});}
+});
 test('D1 indexed derivation is read-only, bounded and gives daily collection counts',()=>{
  const dir=mkdtempSync(join(tmpdir(),'cux-D1-')),db=new Ledger(join(dir,'usage.db'));
  try{
