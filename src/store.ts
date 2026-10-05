@@ -150,12 +150,16 @@ export class Ledger {
  issue(path:string,offset:number,code:string,timestamp:string|null){this.db.prepare('INSERT OR IGNORE INTO ingest_issues VALUES (?,?,?,?,?)').run(hash([path,offset,code]),hash(path),offset,code,timestamp);}
  checkpoint(path:string):any{return this.db.prepare('SELECT * FROM ingest_files WHERE path=?').get(path);}
  saveCheckpoint(path:string,stat:{dev:number;ino:number;size:number;mtimeMs:number;ctimeMs:number},offset:number,state:ParseState,prefixHash:string){this.db.prepare('INSERT OR REPLACE INTO ingest_files(path,device,inode,size,mtime,offset,state_json,updated_at,prefix_hash,parser_version,ctime) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(path,String(stat.dev),String(stat.ino),stat.size,stat.mtimeMs,offset,JSON.stringify(state),new Date().toISOString(),prefixHash,3,stat.ctimeMs);}
+ private archiveLegacy(raw:string){
+  const row=JSON.parse(raw) as Usage;
+  this.db.prepare('INSERT OR IGNORE INTO legacy_candidate_history VALUES (?,?,?)').run(row.id,raw,'source_unavailable');
+ }
  beginLegacyReplay(thread:string){
   // A rewritten sequence must not splice new counters into the old sequence.
   // Preserve removed pending facts outside the active chain; existing history stays visible and marked.
   for(const c of this.db.prepare('SELECT * FROM legacy_candidates WHERE thread_id=?').all(thread)){
    const row=JSON.parse(c.raw_json as string) as Usage;
-   this.db.prepare('INSERT OR REPLACE INTO legacy_candidate_history VALUES (?,?,?)').run(row.id,c.raw_json,'source_unavailable');
+   this.archiveLegacy(c.raw_json as string);
    const old=this.db.prepare('SELECT raw_json FROM usage_records WHERE id=?').get(row.id);
    if(old)this.insertUsage({...JSON.parse(old.raw_json as string),repair_status:'source_unavailable'},'retain');
   }
@@ -166,7 +170,9 @@ export class Ledger {
   const stored=this.db.prepare('SELECT raw_json FROM legacy_candidate_history WHERE id=?').get(row.id)??this.db.prepare('SELECT raw_json FROM usage_records WHERE id=?').get(row.id)??this.db.prepare("SELECT raw_json FROM legacy_candidates WHERE json_extract(raw_json,'$.id')=? LIMIT 1").get(row.id);
   if(this.conflicted(row.id)){this.quarantine([row]);return;}
   if(stored){const old=JSON.parse(stored.raw_json as string) as Usage;if(!sameFacts(old,row)){this.quarantine([old,row]);return;}}
-  this.db.prepare('DELETE FROM legacy_candidate_history WHERE id=?').run(row.id);
+  // A second path can reuse this sequence slot for a different identity.
+  const occupied=this.db.prepare('SELECT raw_json FROM legacy_candidates WHERE thread_id=? AND event_index=?').get(row.thread_id,index);
+  if(occupied&&JSON.parse(occupied.raw_json as string).id!==row.id)this.archiveLegacy(occupied.raw_json as string);
   this.db.prepare('INSERT OR REPLACE INTO legacy_events VALUES (?,?,?)').run(row.thread_id,index,row.fingerprint);
   this.db.prepare('INSERT OR REPLACE INTO legacy_candidates VALUES (?,?,?,?,?,?)').run(row.thread_id,index,row.parent_thread_id,row.fingerprint,JSON.stringify(row),'pending');
  }
@@ -198,7 +204,14 @@ export class Ledger {
     if(this.superseded(row))disposition='superseded';
     this.db.prepare('UPDATE legacy_candidates SET disposition=? WHERE thread_id=? AND event_index=?').run(disposition,c.thread_id,c.event_index);
     if(disposition==='confirmed'){if(this.insertUsage(row,intent))added++;}
-    else {this.db.prepare("DELETE FROM usage_records WHERE id=? AND source='legacy_token_count'").run(row.id);}
+    else {
+     // Pending is insufficient evidence to revoke a deliberately retained fact.
+     if(disposition==='pending'){
+      const saved=this.db.prepare("SELECT raw_json FROM usage_records WHERE id=? AND source='legacy_token_count'").get(row.id);
+      if(saved&&JSON.parse(saved.raw_json as string).repair_status==='source_unavailable')continue;
+     }
+     this.db.prepare("DELETE FROM usage_records WHERE id=? AND source='legacy_token_count'").run(row.id);
+    }
    }
   }
   return added;
