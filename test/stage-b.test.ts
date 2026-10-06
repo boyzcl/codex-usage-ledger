@@ -140,7 +140,7 @@ test('B ambiguous recovery replays both original contexts without new facts and 
 });
 
 test('B human daily report summarizes unknown-scope observations by date and bucket without capacity cycles',()=>{
- const qs=Array.from({length:100},(_,i)=>{const value=q(`2026-10-03T01:${String(Math.floor(i/2)).padStart(2,'0')}:00.000Z`,i%100);value.id+='-'+i;value.context!.scope={...value.context!.scope,status:'partial',workspace_ref:null,billing_source:null};if(i%2)value.slot='secondary';return value;});
+ const qs=Array.from({length:100},(_,i)=>{const value=q(`2026-10-03T01:${String(Math.floor(i/2)).padStart(2,'0')}:00.000Z`,i%100,null);value.id+='-'+i;value.context!.scope={...value.context!.scope,status:'partial',workspace_ref:null,billing_source:null};if(i%2)value.slot='secondary';return value;});
  const report=dailyReport([],qs,[],range,end,{experimentalEmpirical:true});assert.equal(report.plan_cycles.length,100);
  const before=JSON.stringify(report);
  for(const width of [40,80,180])for(const details of [false,true]){

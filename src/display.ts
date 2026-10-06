@@ -168,7 +168,7 @@ export function format(value:any,options:DisplayOptions={}):string {
  }
  function dailyTable(v:any){
   section('逐日用量 · 模型明细');
-  const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','Plan 消耗','100% 等效 Token','API 等效已知小计','计价覆盖率'];
+  const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','官方已用 起→止','Plan观测消耗（估算，百分点）','100% 等效 Token','API 等效已知小计','计价覆盖率'];
   const table:{cells:string[];bold:boolean}[]=[];
   const dayLabel=(d:string)=>d.slice(5).replace('-','/');
   const verified=(p:any)=>p.scope?.status==='verified'&&p.scope.account_ref&&p.scope.workspace_ref&&p.scope.billing_source;
@@ -176,7 +176,7 @@ export function format(value:any,options:DisplayOptions={}):string {
   // Display groups are labels for observations only. They never join evidence or percentages into a capacity cycle.
   const summaries=(plans:any[])=>{
    const groups=new Map<string,{limit_id:string;slot:string;minutes:number;count:number;from:string;to:string}>();
-   for(const p of plans.filter((p:any)=>!verified(p))){const key=JSON.stringify([p.limit_id,p.slot,p.window_duration_mins]),old=groups.get(key);
+   for(const p of plans.filter((p:any)=>!p.scope?.account_ref||p.scope?.status==='mixed')){const key=JSON.stringify([p.limit_id,p.slot,p.window_duration_mins]),old=groups.get(key);
     if(old){old.count+=p.observation_count;old.from=[old.from,p.observed_from].filter(Boolean).sort()[0];old.to=[old.to,p.observed_to].filter(Boolean).sort().at(-1)!;}
     else groups.set(key,{limit_id:p.limit_id,slot:p.slot,minutes:p.window_duration_mins,count:p.observation_count,from:p.observed_from,to:p.observed_to});
    }
@@ -186,46 +186,55 @@ export function format(value:any,options:DisplayOptions={}):string {
   if(v.legacy_reconciliation?.pending_tokens)add('待核对的分叉 Token：'+num(v.legacy_reconciliation.pending_tokens)+'；未计入确认用量。',33);
   if(v.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(v.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
   if(v.totals?.source_unavailable_tokens)add('保留的缺源历史 Token：'+num(v.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);
-  const planCells=(plans:any[])=>plans.length===1?[plans[0].percent_points==null?'—':exact(plans[0].percent_points)+'%'+(plans[0].partial?'*':''),plans[0].estimated_tokens==null?'—':'约 '+num(plans[0].estimated_tokens)]:['—','—'];
-  const record=(date:string,label:string,t:any,priced:any,plans:any[]=[],bold=false)=>{
-   const has=t?.records>0,pc=planCells(plans);
-   table.push({cells:[date,label,has?num(t.total_tokens):'—',has?num(t.input_tokens):'—',has?num(t.output_tokens):'—',has&&t.input_tokens>0?percent(t.cached_input_tokens/t.input_tokens):'—',...pc,has&&priced?.api_token_coverage>0?money(priced.known_api_subtotal_usd):'—',has?percent(priced?.api_token_coverage):'—'],bold});
+  const capacityCell=(plans:any[])=>plans.length===1&&plans[0].estimated_tokens!=null?'约 '+num(plans[0].estimated_tokens):'—';
+  const observationCells=(plans:any[])=>plans.length===1&&plans[0].scope.account_ref&&plans[0].scope.status!=='mixed'?[plans[0].observation_count===1?exact(plans[0].from_percent)+'%（单点）':exact(plans[0].from_percent)+'% → '+exact(plans[0].to_percent)+'%',plans[0].percent_points==null?'—':exact(plans[0].percent_points)+'*']:['—','—'];
+  const record=(date:string,label:string,t:any,priced:any,plans:any[]=[],bold=false,observation:any[]=[])=>{
+   const has=t?.records>0;
+   table.push({cells:[date,label,has?num(t.total_tokens):'—',has?num(t.input_tokens):'—',has?num(t.output_tokens):'—',has&&t.input_tokens>0?percent(t.cached_input_tokens/t.input_tokens):'—',...observationCells(observation),capacityCell(plans),has&&priced?.api_token_coverage>0?money(priced.known_api_subtotal_usd):'—',has?percent(priced?.api_token_coverage):'—'],bold});
   };
   const modelRows=(date:string,models:any)=>{for(const [model,t] of (Object.entries(models??{}) as [string,any][]).sort((a,b)=>b[1].total_tokens-a[1].total_tokens))record(date,'↳ '+(model==='unknown'?'未识别模型':safe(model)),t,t.current_price_valuation);};
   const planRows=(plans:any[],date:string)=>{for(const [i,p] of plans.entries()){
-   table.push({cells:[date,`↳ 窗口 ${i+1}`,'—','—','—','—',...planCells([p]),'—','—'],bold:false});
+   table.push({cells:[date,`↳ 窗口 ${i+1}`,'—','—','—','—','—','—',capacityCell([p]),'—','—'],bold:false});
   }};
+  const visible=(plans:any[]=[])=>plans.filter(p=>p.scope.account_ref&&p.scope.status!=='mixed');
+  const observationRows=(plans:any[],date:string)=>{if(plans.length>1)for(const [i,p] of plans.entries())table.push({cells:[date,`观测 ${i+1} · ${safe(p.scope.account_ref.slice(0,8))} · ${safe(p.limit_id)} / ${safe(p.slot)}`,'—','—','—','—',...observationCells([p]),'—','—','—'],bold:false});};
   for(const day of v.daily){
    const label=dayLabel(day.date)+(day.ongoing?' 至今':'');
-   const plans=day.plans.filter(verified);
-   record(label,day.totals.records?'当日合计':'无记录',day.totals,day.current_price_valuation,plans,true);
-   modelRows('↳',day.models);if(plans.length>1)planRows(plans,'↳');
-   for(const s of summaries(day.plans))table.push({cells:['↳',`观测 · ${safe(s.limit_id)} / ${safe(s.slot)} · ${windowName(s.minutes)} · ${exact(s.count)} 条`,'—','—','—','—','—','—','—','—'],bold:false});
+   const plans=day.plans.filter(verified),observation=visible(day.observation);
+   record(label,day.totals.records?'当日合计':'无记录',day.totals,day.current_price_valuation,plans,true,observation);
+   modelRows('↳',day.models);observationRows(observation,'↳');if(plans.length>1)planRows(plans,'↳');
+   for(const s of summaries(day.plans))table.push({cells:['↳',`观测 · ${safe(s.limit_id)} / ${safe(s.slot)} · ${windowName(s.minutes)} · ${exact(s.count)} 条`,'—','—','—','—','—','—','—','—','—'],bold:false});
   }
-  record('区间合计','全部模型',v.totals,v.current_price_valuation,cycles,true);modelRows('↳',v.models);
-  if(cycles.length>1)planRows(cycles,'区间分段');
-  // All ten columns remain in a single table. Cells wrap inside their own column;
+  record('区间合计','全部模型',v.totals,v.current_price_valuation,cycles,true,visible(v.observation));modelRows('↳',v.models);
+  observationRows(visible(v.observation),'区间观测');if(cycles.length>1)planRows(cycles,'区间分段');
+  // All eleven columns remain in a single table. Cells wrap inside their own column;
   // extremely narrow terminals use a labeled row rather than dropping columns.
   if(width<64){
    for(const r of table){add();for(let i=0;i<headers.length;i++)pair(headers[i],r.cells[i],r.bold&&i<2?1:undefined);}
   }else{
-   const widths=width>=140?[10,23,12,12,11,10,10,17,13,10]:width>=110?[8,18,10,10,9,8,8,13,11,8]:[6,10,7,7,7,6,6,9,9,6];
-   while(widths.reduce((a,b)=>a+b,0)+9>width){const index=widths.indexOf(Math.max(...widths));widths[index]--;}
+   const widths=width>=140?[10,23,12,12,11,10,16,16,17,13,10]:width>=110?[8,18,10,10,9,8,14,12,13,11,8]:[6,10,7,7,7,6,9,8,9,9,6];
+   while(widths.reduce((a,b)=>a+b,0)+10>width){const index=widths.indexOf(Math.max(...widths));widths[index]--;}
    const print=(cells:string[],bold=false)=>{const lines=cells.map((c,i)=>wrap(safe(c),widths[i]));const height=Math.max(...lines.map(x=>x.length));for(let n=0;n<height;n++){const line=lines.map((parts,i)=>{const part=parts[n]??'';return part+' '.repeat(Math.max(0,widths[i]-cellWidth(part)));}).join('│');rows.push({text:line.trimEnd(),style:bold?1:undefined});}};
    print(headers,true);add(widths.map(w=>'─'.repeat(w)).join('┼'),2);
    for(const [i,r] of table.entries()){if(i&&r.bold)add(widths.map(w=>'─'.repeat(w)).join('┼'),2);print(r.cells,r.bold);}
   }
   if(v.daily_basis?.strict_reason)add('严格容量估算不可用：账号与额度窗口归属尚未核实。'+(v.daily_basis.experimental_empirical?'已启用显式实验经验外推；缺少证据时仍为空。':''),33);
   add();add('— 表示无记录、不可估计或未做模型额度归因，不代表 0。',2);
-  add('* Plan 仅统计已观测时段；Token 列是全日/至今用量，反推只使用匹配时段的 Token。',2);
+  add('* Plan观测消耗为分段内相邻非负变化之和，单位为百分点；仅覆盖采样时段，并非精确日账单。',2);
+  add('官方已用保留首末原始比例；回退、重置或截止时间变化分段，不补造午夜值，不跨账号或归属变化拼接。',2);
   add('API 金额为按当前价格重估的已知小计，并非订阅账单；模型行不可与合计再次相加。',2);
   add('100% 等效 Token 是经验外推，并非官方上限；假设模型/速度/缓存组合不变且无未记录消耗。',2);
   if(cycles.length>1)add('存在多个额度窗口或重置周期，分别列示；不同周期的百分比不合并。',33);
-  if(v.plan_cycles.some((p:any)=>!verified(p)))add('未知归属的快照按日期和额度桶标签摘要展示；不拼接百分比、不推算容量。独立证据保留在 JSON 输出。',2);
+  if(v.plan_cycles.some((p:any)=>!p.scope?.account_ref||p.scope?.status==='mixed'))add('未知归属的快照按日期和额度桶标签摘要展示；不拼接百分比、不推算容量。独立证据保留在 JSON 输出。',2);
   const reasons:Record<string,string>={unverified_workspace_billing_identity:'后台账号范围已知，工作区/计费归属仍未完全核实',partial_local_account_window_attribution:'部分本地用量仍未归属，不能外推整体容量',unknown_account_identity:'额度快照缺少可验证账号身份',mixed_account_identity:'额度身份存在冲突，未拼接观测',unverified_local_account_window_attribution:'本地用量与账号及额度窗口的对应关系未知',unverified_account_window_attribution:'账号与额度窗口归属尚未核实',conflicting_snapshots:'同一时刻额度快照冲突',no_observations:'缺少成对观测',small_percent_change:'变化不足 5 个百分点',percent_decrease:'区间内百分比回退',external_usage_suspected:'存在疑似外部消耗',inconsistent_tokens:'Token 数据不一致',saturated:'额度已达 100%，观测受上限影响',no_matched_tokens:'没有匹配的本地 Token'};
   const emptyDays=v.daily.filter((d:any)=>!d.plans.length).map((d:any)=>dayLabel(d.date));
-  if(emptyDays.length)add('无官方成对快照的日期不估算 Plan 消耗或容量。',2);
+  if(emptyDays.length)add('无官方快照时比例未知；单点仅显示原始比例，观测消耗未知。',2);
   for(const day of v.daily){
+   for(const p of visible(day.observation)){
+    add(`${dayLabel(day.date)} 官方观测：账号 ${safe(p.scope.account_ref.slice(0,8))} / ${safe(p.limit_id)} / ${safe(p.slot)} / ${windowName(p.window_duration_mins)}；${stamp(p.observed_from)} → ${stamp(p.observed_to)}；${p.observation_count} 点 / ${p.segments.length} 段${p.flags.includes('scope_change')?'；归属变化分段':''}${p.flags.includes('invalid_window')?'；窗口有效期不明，仅保留比例':''}${p.flags.includes('reset_deadline_change')?'；截止变化分段':''}${p.flags.includes('percent_decrease')?'；回退分段':''}${p.flags.includes('sampling_gap')?'；存在超过 30 分钟的采样空档':''}${p.flags.includes('conflicting_snapshots')?'；冲突点未计入消耗':''}。`,2);
+    if(details)pair('观测归属',`账号 ${p.scope.account_ref} / 工作区 ${p.scope.workspace_ref??'未知'} / 计费 ${p.scope.billing_source??'未知'}`);
+    if(details)for(const segment of p.segments){const first=segment.points[0],last=segment.points.at(-1);pair('观测分段',`${stamp(first.timestamp)} ${exact(first.used_percent)}% → ${stamp(last.timestamp)} ${exact(last.used_percent)}%；${segment.split_reason}；重置 ${segment.resets_at==null?'未知':new Date(segment.resets_at*1000).toISOString()}`);}
+   }
    for(const s of summaries(day.plans))add(`${dayLabel(day.date)} 观测摘要：${safe(s.limit_id)} / ${safe(s.slot)} / ${windowName(s.minutes)}；${exact(s.count)} 条；${stamp(s.from)} → ${stamp(s.to)}；归属未知。`,2);
    const plans=day.plans.filter(verified);
    for(const [i,p] of plans.entries()){

@@ -1,4 +1,5 @@
 import {quotaCycleKey,quotaContext,attributedTo,allocationReason} from './quota-policy.js';
+import {planObservations,observationsForDay} from './plan-observation.js';
 import {capacityView} from './capacity-policy.js';
 import type {Quota,Usage,PriceRule} from './types.js';
 import {aggregate,report,localDay,midnight,shiftDay} from './report.js';
@@ -94,9 +95,10 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
  const dayFormat=new Intl.DateTimeFormat('en-CA',{timeZone:range.timezone,year:'numeric',month:'2-digit',day:'2-digit'});
  for(let i=0;i<rows.length;i++){const day=dayFormat.format(new Date(rows[i].timestamp));if(!rowGroups.has(day)){rowGroups.set(day,[]);priceGroups.set(day,[]);}rowGroups.get(day)!.push(rows[i]);priceGroups.get(day)!.push(priced[i]);}
  // Open-ended report defaults cover the observed history, not ten thousand empty years.
- const first=Number(range.from.slice(0,4))<=1?(rows[0]?.timestamp??at):range.from;
+ const first=Number(range.from.slice(0,4))<=1?[at,...rows.slice(0,1).map(r=>r.timestamp),...quotas.filter(q=>q.source==='app_server'&&q.timestamp<=at).map(q=>q.timestamp)].sort()[0]:range.from;
  const last=Number(range.to_exclusive.slice(0,4))>=9998?new Date(Date.parse(at)+1).toISOString():range.to_exclusive;
  const firstDay=localDay(first,range.timezone),lastDay=localDay(new Date(Date.parse(last)-1).toISOString(),range.timezone);
+ const observation=planObservations(quotas,{...range,to_exclusive:[range.to_exclusive,new Date(Date.parse(at)+1).toISOString()].sort()[0]});
  const daily=[];
  for(let date=firstDay;date<=lastDay;date=shiftDay(date,1)){
   if(daily.length>=3660)throw Error('report_range_too_large');
@@ -104,7 +106,7 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
   const to=[midnight(shiftDay(date,1),range.timezone),range.to_exclusive,new Date(Date.parse(at)+1).toISOString()].sort()[0];
   const group=rowGroups.get(date)??[],pg=priceGroups.get(date)??[];
   const models=Object.fromEntries([...new Set(group.map(r=>r.model))].sort().map(model=>[model,{...aggregate(group.filter(r=>r.model===model)),current_price_valuation:aggregate(pg.filter(r=>r.model===model)),plan_percent_points:null,estimated_plan_tokens:null}]));
-  daily.push({date,from,to_exclusive:to,ongoing:date===localDay(at,range.timezone)&&range.to_exclusive>at,totals:aggregate(group),models,current_price_valuation:aggregate(pg),plans:from<to?empiricalPlans(pg,quotas,{...range,from,to_exclusive:to}):[]});
+  daily.push({date,observation:observationsForDay(observation,date),from,to_exclusive:to,ongoing:date===localDay(at,range.timezone)&&range.to_exclusive>at,totals:aggregate(group),models,current_price_valuation:aggregate(pg),plans:from<to?empiricalPlans(pg,quotas,{...range,from,to_exclusive:to}):[]});
  }
  const modelsCurrent=Object.fromEntries(Object.keys(base.models).map(model=>[model,{...base.models[model],current_price_valuation:aggregate(priced.filter(r=>r.model===model)),plan_percent_points:null,estimated_plan_tokens:null}]));
  const cycles=combinePlans(daily.flatMap(d=>d.plans));
@@ -115,5 +117,5 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
   if(invalid.length){p.flags=[...new Set([...p.flags,...invalid])];p=finish({...p,estimated_tokens:null,estimated_api_known_usd:null,rounding_only_lower:null,rounding_only_upper:null});}
   return restrict(p);
  });
- return {...base,as_of:at,observation_coverage:{status:'partial',from:quotas[0]?.timestamp??null,to:quotas.at(-1)?.timestamp??null,samples:quotas.length,note:'Observed samples do not establish continuous account history.'},display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:cycles.map(restrict),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,experimental_empirical:!!options.experimentalEmpirical,strict_reason:'unverified_account_window_attribution',allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
+ return {...base,as_of:at,observation,observation_basis:{unit:'percentage_points',source:'app_server',coverage:'observed_only',aggregation:'Nonnegative adjacent changes within chronological scope/window/day segments; no midnight interpolation or model allocation.'},observation_coverage:{status:'partial',from:quotas[0]?.timestamp??null,to:quotas.at(-1)?.timestamp??null,samples:quotas.length,note:'Observed samples do not establish continuous account history.'},display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:cycles.map(restrict),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,experimental_empirical:!!options.experimentalEmpirical,strict_reason:'unverified_account_window_attribution',allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
 }
