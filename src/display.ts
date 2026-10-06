@@ -168,7 +168,7 @@ export function format(value:any,options:DisplayOptions={}):string {
  }
  function dailyTable(v:any){
   section('逐日用量 · 模型明细');
-  const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','官方已用 起→止','Plan观测消耗（估算，百分点）','100% 等效 Token','API 等效已知小计','计价覆盖率'];
+  const headers=['日期','模型 / 层级','总 Token','输入','输出','缓存命中率','剩余额度变化','Plan观测消耗（估算，百分点）','100% 等效 Token','API 等效已知小计','计价覆盖率'];
   const table:{cells:string[];bold:boolean}[]=[];
   const dayLabel=(d:string)=>d.slice(5).replace('-','/');
   const verified=(p:any)=>p.scope?.status==='verified'&&p.scope.account_ref&&p.scope.workspace_ref&&p.scope.billing_source;
@@ -187,7 +187,16 @@ export function format(value:any,options:DisplayOptions={}):string {
   if(v.legacy_reconciliation?.source_unavailable_candidate_tokens)add('缺源的待核对候选 Token：'+num(v.legacy_reconciliation.source_unavailable_candidate_tokens)+'；保留事实，未计入确认用量。',33);
   if(v.totals?.source_unavailable_tokens)add('保留的缺源历史 Token：'+num(v.totals.source_unavailable_tokens)+'；当前无法重新核实归因。',33);
   const capacityCell=(plans:any[])=>plans.length===1&&plans[0].estimated_tokens!=null?'约 '+num(plans[0].estimated_tokens):'—';
-  const observationCells=(plans:any[])=>plans.length===1&&plans[0].scope.account_ref&&plans[0].scope.status!=='mixed'?[plans[0].observation_count===1?exact(plans[0].from_percent)+'%（单点）':exact(plans[0].from_percent)+'% → '+exact(plans[0].to_percent)+'%',plans[0].percent_points==null?'—':exact(plans[0].percent_points)+'*']:['—','—'];
+  const clock=(iso:string)=>new Intl.DateTimeFormat('en-GB',{timeZone:tz,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(iso));
+  const remainingCell=(p:any)=>{
+   if(p.observation_count===1)return exact(p.remaining?.from_percent??100-p.from_percent)+'%（单点）';
+   const trajectory=p.remaining?.trajectory??[{remaining_percent:100-p.from_percent,event:'start'},{remaining_percent:100-p.to_percent,event:'end'}];
+   const recoveries=trajectory.filter((point:any)=>point.event==='recovery');
+   const fourth=recoveries.length>3&&!details?trajectory.indexOf(recoveries[3]):-1;
+   const shown=fourth<0?trajectory:trajectory.slice(0,trajectory[fourth-1].event==='before_recovery'?fourth-1:fourth);
+   return shown.map((point:any)=>exact(point.remaining_percent)+'%'+(point.event==='recovery'?`（${clock(point.timestamp)}回升）`:'')).join(' → ')+(fourth<0?'':` → …（另 ${recoveries.length-3} 次回升）→ ${exact(p.remaining.to_percent)}%`);
+  };
+  const observationCells=(plans:any[])=>plans.length===1&&plans[0].scope.account_ref&&plans[0].scope.status!=='mixed'?[remainingCell(plans[0]),plans[0].percent_points==null&&!(plans[0].boundary_positive_percent_points>0)?'—':`已计 ${plans[0].percent_points==null?'—':exact(plans[0].percent_points)}；边界未计 ${plans[0].boundary_positive_percent_points==null?'—':exact(plans[0].boundary_positive_percent_points)}`]:['—','—'];
   const record=(date:string,label:string,t:any,priced:any,plans:any[]=[],bold=false,observation:any[]=[])=>{
    const has=t?.records>0;
    table.push({cells:[date,label,has?num(t.total_tokens):'—',has?num(t.input_tokens):'—',has?num(t.output_tokens):'—',has&&t.input_tokens>0?percent(t.cached_input_tokens/t.input_tokens):'—',...observationCells(observation),capacityCell(plans),has&&priced?.api_token_coverage>0?money(priced.known_api_subtotal_usd):'—',has?percent(priced?.api_token_coverage):'—'],bold});
@@ -220,8 +229,8 @@ export function format(value:any,options:DisplayOptions={}):string {
   }
   if(v.daily_basis?.strict_reason)add('严格容量估算不可用：账号与额度窗口归属尚未核实。'+(v.daily_basis.experimental_empirical?'已启用显式实验经验外推；缺少证据时仍为空。':''),33);
   add();add('— 表示无记录、不可估计或未做模型额度归因，不代表 0。',2);
-  add('* Plan观测消耗为分段内相邻非负变化之和，单位为百分点；仅覆盖采样时段，并非精确日账单。',2);
-  add('官方已用保留首末原始比例；回退、重置或截止时间变化分段，不补造午夜值，不跨账号或归属变化拼接。',2);
+  add('Plan 已计为分段内已用比例的非负变化之和；边界未计另列，不加入已计。单位为百分点，非精确日账单。',2);
+  add('默认剩余＝100−官方已用，保留回升关键点；单秒截止变化只标边界，不当作实际重置。不补造午夜值。',2);
   add('API 金额为按当前价格重估的已知小计，并非订阅账单；模型行不可与合计再次相加。',2);
   add('100% 等效 Token 是经验外推，并非官方上限；假设模型/速度/缓存组合不变且无未记录消耗。',2);
   if(cycles.length>1)add('存在多个额度窗口或重置周期，分别列示；不同周期的百分比不合并。',33);
@@ -231,9 +240,12 @@ export function format(value:any,options:DisplayOptions={}):string {
   if(emptyDays.length)add('无官方快照时比例未知；单点仅显示原始比例，观测消耗未知。',2);
   for(const day of v.daily){
    for(const p of visible(day.observation)){
-    add(`${dayLabel(day.date)} 官方观测：账号 ${safe(p.scope.account_ref.slice(0,8))} / ${safe(p.limit_id)} / ${safe(p.slot)} / ${windowName(p.window_duration_mins)}；${stamp(p.observed_from)} → ${stamp(p.observed_to)}；${p.observation_count} 点 / ${p.segments.length} 段${p.flags.includes('scope_change')?'；归属变化分段':''}${p.flags.includes('invalid_window')?'；窗口有效期不明，仅保留比例':''}${p.flags.includes('reset_deadline_change')?'；截止变化分段':''}${p.flags.includes('percent_decrease')?'；回退分段':''}${p.flags.includes('sampling_gap')?'；存在超过 30 分钟的采样空档':''}${p.flags.includes('conflicting_snapshots')?'；冲突点未计入消耗':''}。`,2);
+    add(`${dayLabel(day.date)} 剩余轨迹（${safe(p.limit_id)} / ${safe(p.slot)}）：${remainingCell(p)}；${observationCells([p])[1]}；采样 ${clock(p.observed_from)}→${clock(p.observed_to)}，${p.observation_count} 点 / ${p.segments.length} 段${p.flags.includes('sampling_gap')?'；采样空档超过 30 分钟':''}。`,2);
+    if(details)add(`账号 ${safe(p.scope.account_ref)} / ${windowName(p.window_duration_mins)}；采样 ${stamp(p.observed_from)} → ${stamp(p.observed_to)}${p.flags.includes('scope_change')?'；归属变化分段':''}${p.flags.includes('invalid_window')?'；窗口有效期不明，仅保留比例':''}${p.flags.includes('reset_deadline_change')?'；截止变化分段':''}${p.flags.includes('conflicting_snapshots')?'；冲突点未计入消耗':''}。`,2);
+    if(details)pair('官方已用 起→止',`${exact(p.from_percent)}% → ${exact(p.to_percent)}%`);
+    if(details)for(const boundary of p.boundary_changes??[])pair('边界未计正向变化',`${stamp(boundary.from.timestamp)} → ${stamp(boundary.to.timestamp)}；${exact(boundary.positive_percent_points)} 个百分点；${boundary.reason}`);
     if(details)pair('观测归属',`账号 ${p.scope.account_ref} / 工作区 ${p.scope.workspace_ref??'未知'} / 计费 ${p.scope.billing_source??'未知'}`);
-    if(details)for(const segment of p.segments){const first=segment.points[0],last=segment.points.at(-1);pair('观测分段',`${stamp(first.timestamp)} ${exact(first.used_percent)}% → ${stamp(last.timestamp)} ${exact(last.used_percent)}%；${segment.split_reason}；重置 ${segment.resets_at==null?'未知':new Date(segment.resets_at*1000).toISOString()}`);}
+    if(details)for(const segment of p.segments){const first=segment.points[0],last=segment.points.at(-1);pair('已用分段',`${stamp(first.timestamp)} ${exact(first.used_percent)}% → ${stamp(last.timestamp)} ${exact(last.used_percent)}%；${segment.split_reason}；重置 ${segment.resets_at==null?'未知':new Date(segment.resets_at*1000).toISOString()}`);}
    }
    for(const s of summaries(day.plans))add(`${dayLabel(day.date)} 观测摘要：${safe(s.limit_id)} / ${safe(s.slot)} / ${windowName(s.minutes)}；${exact(s.count)} 条；${stamp(s.from)} → ${stamp(s.to)}；归属未知。`,2);
    const plans=day.plans.filter(verified);
