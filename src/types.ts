@@ -1,8 +1,10 @@
 import type {QuotaScope,QuotaContext} from './quota-policy.js';
+import type {ConditionalOptions,UsageChannel} from './conditional-capacity.js';
 export const tokenFields = ['input_tokens','cached_input_tokens','cache_write_input_tokens','output_tokens','reasoning_output_tokens','total_tokens'] as const;
 export type TokenField = typeof tokenFields[number];
 export type Tokens = Record<TokenField, number>;
 export interface Usage extends Tokens {
+ consumption_channel?:{kind:UsageChannel;source:'source_event'|'user_declaration'};
  quota_attribution?:{scope:QuotaScope;limit_id:string;slot:string;window_duration_mins:number;resets_at:number;source:'source_event'};
  origin_thread_id?:string;origin_source?:string;
  repair_status?:'source_unavailable';fork_ordinal_exclusive?:number|null;
@@ -33,6 +35,7 @@ export interface PriceRule {
  rates:Rates;source_url:string;retrieved_at:string;basis:string;
 }
 export interface Config {
+ conditional_capacity?:ConditionalOptions;
  codex_home:string; timezone:string; poll_seconds:number; codex_binary:string;
  monitor?:{local_reconcile_seconds:number;quota_active_seconds:number;quota_idle_seconds:number;activity_seconds:number;summary_seconds:number;debounce_ms:number};
  estimator:{weight_basis:'verified'|'credit_proxy';bucket_models:Record<string,string[]>};

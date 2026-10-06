@@ -84,16 +84,16 @@ test('ongoing day, empty ranges and open-ended reports have bounded honest calen
  const dst=dailyReport([],[],[],period('report','America/New_York','2026-03-08','2026-03-08',at),at);
  assert.equal(Date.parse(dst.daily[0].to_exclusive)-Date.parse(dst.daily[0].from),23*3600000);
 });
-test('all eleven columns and all models survive wide and narrow rendering, with dashed model quota cells',()=>{
+test('all twelve columns and all models survive wide and narrow rendering, with dashed model quota cells',()=>{
  const {rows,qs}=sample();rows.push(...Array.from({length:7},(_,i)=>use('2026-10-01T01:40:00.000Z',100,'model-'+i)));
  const v={period:range,...dailyReport(rows,qs,[rule],range,at)};
  for(const width of [24,40,64,80,110,140,180]){
   const s=format(v,{command:'report',width,now:Date.parse(at)});assert.ok(s.split('\n').every(l=>cellWidth(l)<=width),s);
-  assert.doesNotMatch(s,/暂不可归因|暂不可独立估算/);const columns=width<64?s:Array.from({length:11},(_,i)=>s.split('\n').filter(l=>l.includes('│')).map(l=>l.split('│')[i].replace(/\s/g,'')).join('')).join('\n');assert.match(columns,/区间合计/);assert.match(columns,/model-0/);
+  assert.doesNotMatch(s,/暂不可归因|暂不可独立估算/);const columns=width<64?s:Array.from({length:12},(_,i)=>s.split('\n').filter(l=>l.includes('│')).map(l=>l.split('│')[i].replace(/\s/g,'')).join('')).join('\n');assert.match(columns,/区间合计/);assert.match(columns,/model-0/);
  }
- const wide=format(v,{command:'report',width:180});const model=wide.split('\n').find(l=>l.includes('model-0'))!.split('│');assert.equal(model.length,11);assert.equal(model[6].trim(),'—');assert.equal(model[7].trim(),'—');assert.equal(model[8].trim(),'—');
+ const wide=format(v,{command:'report',width:180});const model=wide.split('\n').find(l=>l.includes('model-0'))!.split('│');assert.equal(model.length,12);assert.equal(model[6].trim(),'—');assert.equal(model[7].trim(),'—');assert.equal(model[8].trim(),'—');
 });
-test('multiple cycle rows always contain eleven cells',()=>{
+test('multiple observed windows keep twelve cells and distinct observations',()=>{
  const {rows,qs}=sample();const v={period:range,...dailyReport(rows,[...qs,...qs.map(q=>({...q,slot:'secondary'}))],[rule],range,at)};
- const text=format(v,{command:'report',width:180});const lines=text.split('\n').filter(l=>l.includes('│'));assert.ok(lines.every(l=>l.split('│').length===11));assert.match(text,/窗口 2/);
+ const text=format(v,{command:'report',width:180});const lines=text.split('\n').filter(l=>l.includes('│'));assert.ok(lines.every(l=>l.split('│').length===12));assert.match(text,/观测 2/);
 });

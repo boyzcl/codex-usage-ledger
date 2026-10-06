@@ -4,6 +4,7 @@ import {capacityView} from './capacity-policy.js';
 import type {Quota,Usage,PriceRule} from './types.js';
 import {aggregate,report,localDay,midnight,shiftDay} from './report.js';
 import {createPricer} from './pricing.js';
+import {conditionalCapacity,type ConditionalOptions} from './conditional-capacity.js';
 export interface Range {from:string;to_exclusive:string;timezone:string;}
 export const cycleKey=quotaCycleKey;
 export interface Empirical {
@@ -88,7 +89,7 @@ export function combinePlans(plans:Empirical[]):Empirical[]{
   return finish({...p,estimated_tokens:null,estimated_api_known_usd:null,rounding_only_lower:null,rounding_only_upper:null});
  });
 }
-export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:Range,at=new Date().toISOString(),options:{experimentalEmpirical?:boolean}={}){
+export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:Range,at=new Date().toISOString(),options:{experimentalEmpirical?:boolean;conditional?:ConditionalOptions}={}){
  const base=report(rows,rules,at),price=createPricer(rules),priced=rows.map(r=>price({...r,timestamp:at})).map((r,i)=>({...r,timestamp:rows[i].timestamp}));
  const rowGroups=new Map<string,Usage[]>(),priceGroups=new Map<string,Usage[]>();
  // Reuse the formatter: a large historical report must not build one Intl formatter per record.
@@ -99,6 +100,7 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
  const last=Number(range.to_exclusive.slice(0,4))>=9998?new Date(Date.parse(at)+1).toISOString():range.to_exclusive;
  const firstDay=localDay(first,range.timezone),lastDay=localDay(new Date(Date.parse(last)-1).toISOString(),range.timezone);
  const observation=planObservations(quotas,{...range,to_exclusive:[range.to_exclusive,new Date(Date.parse(at)+1).toISOString()].sort()[0]});
+ const conditional=conditionalCapacity(rows,quotas,rules,{...range,to_exclusive:[range.to_exclusive,new Date(Date.parse(at)+1).toISOString()].sort()[0]},options.conditional);
  const daily=[];
  for(let date=firstDay;date<=lastDay;date=shiftDay(date,1)){
   if(daily.length>=3660)throw Error('report_range_too_large');
@@ -117,5 +119,5 @@ export function dailyReport(rows:Usage[],quotas:Quota[],rules:PriceRule[],range:
   if(invalid.length){p.flags=[...new Set([...p.flags,...invalid])];p=finish({...p,estimated_tokens:null,estimated_api_known_usd:null,rounding_only_lower:null,rounding_only_upper:null});}
   return restrict(p);
  });
- return {...base,as_of:at,observation,observation_basis:{unit:'percentage_points',percent_basis:'official_used_percent',remaining_basis:'100_minus_official_used_percent',boundary_positive_changes:'Observed positive used-percent changes excluded from segment sums; cross-day edges stay unallocated.',source:'app_server',coverage:'observed_only',aggregation:'Nonnegative adjacent changes within chronological scope/window/day segments; no midnight interpolation or model allocation.'},observation_coverage:{status:'partial',from:quotas[0]?.timestamp??null,to:quotas.at(-1)?.timestamp??null,samples:quotas.length,note:'Observed samples do not establish continuous account history.'},display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:cycles.map(restrict),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,experimental_empirical:!!options.experimentalEmpirical,strict_reason:'unverified_account_window_attribution',allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
+ return {...base,as_of:at,conditional_capacity:conditional,observation,observation_basis:{unit:'percentage_points',percent_basis:'official_used_percent',remaining_basis:'100_minus_official_used_percent',boundary_positive_changes:'Observed positive used-percent changes excluded from segment sums; cross-day edges stay unallocated.',source:'app_server',coverage:'observed_only',aggregation:'Nonnegative adjacent changes within chronological scope/window/day segments; no midnight interpolation or model allocation.'},observation_coverage:{status:'partial',from:quotas[0]?.timestamp??null,to:quotas.at(-1)?.timestamp??null,samples:quotas.length,note:'Observed samples do not establish continuous account history.'},display_period:{from:first,to_exclusive:last,timezone:range.timezone},models:modelsCurrent,daily,plan_cycles:cycles.map(restrict),daily_basis:{timezone:range.timezone,prices_at:at,quota_source:'app_server',minimum_percent_points:5,experimental_empirical:!!options.experimentalEmpirical,strict_reason:'unverified_account_window_attribution',allocation:'Model quota columns are unallocated; empirical capacity uses matched observed usage and assumes no unrecorded account use.'}};
 }

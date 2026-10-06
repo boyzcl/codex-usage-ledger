@@ -14,6 +14,7 @@ import {quotaEstimates} from './estimator.js';
 import {aggregate,period,report,localDay,shiftDay,midnight} from './report.js';
 import {hash} from './quota.js';
 import {dailyReport,empiricalPlans,cycleKey} from './daily.js';
+import {conditionalGaps} from './conditional-capacity.js';
 import {priceUsage,validatePrices,catalogueId} from './pricing.js';
 import {revalue} from './valuation.js';
 import {format,formatError} from './display.js';
@@ -136,7 +137,7 @@ async function main(){
   if(command==='models'){show(report(db.records(),db.rules()));return;}
   const range=period(command==='status'?'today':command,config.timezone,opts.values.from,opts.values.to);
   const rows=db.records(range.from,range.to_exclusive);
-  if(command!=='status'){show({official_availability:db.get('official_availability'),period:range,legacy_reconciliation:db.get('legacy_reconciliation'),...dailyReport(rows,db.officialQuotas(range.from,range.to_exclusive),db.rules(),range,undefined,{experimentalEmpirical:opts.values['experimental-empirical']})});return;}
+  if(command!=='status'){show({official_availability:db.get('official_availability'),period:range,legacy_reconciliation:db.get('legacy_reconciliation'),...dailyReport(rows,db.officialQuotas(range.from,range.to_exclusive),db.rules(),range,undefined,{experimentalEmpirical:opts.values['experimental-empirical'],conditional:{...config.conditional_capacity,gaps:[...(config.conditional_capacity?.gaps??[]),...conditionalGaps(db,range)]}})});return;}
   const lifetime=db.db.prepare('SELECT COALESCE(SUM(total_tokens),0) AS total FROM usage_records').get()!.total as number;
   const official=db.latestAccount();const day=localDay(new Date().toISOString(),config.timezone);const weekStart=midnight(shiftDay(day,-6),config.timezone);
   show({as_of:asOf,official_availability:db.get('official_availability'),workload:currentData().view,legacy_reconciliation:db.get('legacy_reconciliation'),monitor:db.get('monitor_state'),account:db.get('account'),quota:quotaView(db,asOf),today:{period:range,...report(rows,db.rules())},last_7_calendar_days:aggregate(db.records(weekStart)),capacity:withEmpirical(estimates()),last_sync:db.get('last_sync'),account_cross_check:{local_tokens:lifetime,official_lifetime_tokens:official?.summary?.lifetimeTokens??null,difference:null,strict_reason:'unverified_local_account_attribution',official_observed_at:official?.timestamp??null,note:'Local lifetime facts have no proven account attribution; official lifetime scope is not supplied by account/usage/read. No numeric comparison is claimed.'},issues:db.issues()});
