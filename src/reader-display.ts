@@ -86,12 +86,12 @@ export function readerDisplay(value:any,options:DisplayOptions):string {
  }else if(single){pair(days[0].ongoing?'剩余额度（今日采样）':'剩余额度（当日首末采样）',remaining(p));pair('当日消耗估计（百分点）',consumed(p));}
  else{pair('剩余额度（区间末次）',p?exact(p.remaining?.to_percent??100-p.to_percent)+'%':'—');pair('区间消耗（百分点）',consumed(p));}
  pair((status?'今日 ':single?'当日 ':'区间 ')+'Token',t?.records>0?number(t.total_tokens):'—');pair('API 等效（当前价格）',priced(t,price));
- pair('100% API 等效估算',summaryCapacity.api);pair('标准等效 Token 估算',summaryCapacity.tokens);
+ pair('100% API 等效估算',summaryCapacity.api);pair('100% 标准等效 Token',summaryCapacity.tokens);
  if(!t?.records)add('此范围内暂无已入账记录；金额不适用。');
  const usageHeaders=['日期','总 Token','输入','输出','缓存命中','API 等效'];
  if(days.length>1){section('每日用量');table(usageHeaders,[...days.map((d:any)=>usage(d.date+(d.ongoing?' 至今':''),d.totals,d.current_price_valuation)),usage('合计',t,price)],[[0,1,2,3],[0,4,5]]);
   section('每日额度');const dailyRows=days.map((d:any)=>{const obs=observation(d.observation),c=capacities(conditional?.days?.find((cd:any)=>cd.date===d.date)?.windows,d.observation),label=c.label.startsWith('可估')?'（部分）':c.range?'（分段）':'';return [d.date,remaining(obs),consumed(obs),c.api+label,c.tokens+label];});
-  table(['日期','剩余变化','消耗额度（百分点）','100% API 等效估算','标准等效 Token 估算'],[...dailyRows,['累计消耗','—',consumed(p),'—','—']],[[0,1,2],[0,3,4]]);
+  table(['日期','剩余变化','消耗额度（百分点）','100% API 等效估算','100% 标准等效 Token'],[...dailyRows,['累计消耗','—',consumed(p),'—','—']],[[0,1,2],[0,3,4]]);
  }
  section(status||single?'模型用量':'区间模型汇总');
  const modelRows=(Object.entries(report.models??{}) as [string,any][]).sort((a,b)=>b[1].total_tokens-a[1].total_tokens).map(([m,mt])=>usage(m==='unknown'?'未识别模型':m,mt,mt.current_price_valuation));
