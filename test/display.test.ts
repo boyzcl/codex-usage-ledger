@@ -15,7 +15,7 @@ const monitor={running:true,heartbeat_at:'2026-10-03T15:19:31.931Z',active:true,
 const value={as_of:new Date(now).toISOString(),account:{plan:'pro'},quota:[window],today:{totals:total,models:{test:total},current_price_valuation:current},monitor,last_sync:{synced_at:'2026-10-03T15:17:51.699Z'},capacity:[{limit_id:'codex',estimated_capacity:null,reason:'unknown_bucket_model_mapping'}],issues:[{code:'unrecoverable_usage_gap',count:1861}]};
 
 test('status highlights remaining quota, local reset time and partial price with coverage',()=>{
- const s=format(value,{now});assert.ok(s.indexOf('剩余 32%')<s.indexOf('今日用量'));assert.match(s,/2026\/10\/10 09:33/);assert.match(s,/9\.31 亿/);assert.match(s,/\$941\.34/);assert.match(s,/85\.48%/);assert.match(s,/其余 14\.52%/);assert.match(s,/不是订阅账单/);assert.match(s,/缺少模型与额度窗口的映射/);assert.doesNotMatch(s,/92\.07|unknown_bucket|unrecoverable_usage_gap|2026-10-03T/);
+ const s=format(value,{now});assert.ok(s.indexOf('剩余 32%')<s.indexOf('今日 Token'));assert.match(s,/2026\/10\/10 09:33/);assert.match(s,/9\.31 亿/);assert.match(s,/\$941\.34/);assert.match(s,/85\.48%/);assert.match(s,/其余 14\.52%/);assert.match(s.replace(/\n/g,''),/不是订阅账单/);assert.match(s,/状态未提供当日消耗及 100% 估算/);assert.doesNotMatch(s,/92\.07|unknown_bucket|unrecoverable_usage_gap|2026-10-03T/);
 });
 test('details reveal exact counters, price bases and diagnostics without changing the input',()=>{
  const before=JSON.stringify(value),s=format(value,{now,details:true});assert.match(s,/931,154,302/);assert.match(s,/\$92\.07/);assert.match(s,/10\.36%/);assert.match(s,/2,301\.64/);assert.match(s,/unrecoverable_usage_gap/);assert.equal(JSON.stringify(value),before);
@@ -91,7 +91,7 @@ test('sample source usage still aggregates identically independently of presenta
  const t=aggregate(p.usage);assert.equal(t.total_tokens,120);assert.equal(t.cached_input_tokens,40);const before=structuredClone(t);format({totals:t,models:{},current_price_valuation:t},{command:'today'});assert.deepEqual(t,before);
 });
 
-test('unresolved conflict identities are explicit in human status and daily reports',()=>{
- const v={...value,legacy_reconciliation:{conflict_records:2}};assert.match(format(v,{command:'status',now}),/争议用量记录.*2.*未计入确认用量/);
- const report={...value.today,period:{from:'2026-10-03T00:00:00Z',to_exclusive:'2026-10-04T00:00:00Z',timezone:'UTC'},legacy_reconciliation:{conflict_records:2},daily:[],plan_cycles:[]};assert.match(format(report,{command:'report',now}),/争议用量记录.*2.*未计入确认用量/);
+test('unresolved conflicts have one brief default reminder and retain exact detail counts',()=>{
+ const v={...value,legacy_reconciliation:{conflict_records:2}};assert.match(format(v,{command:'status',now}),/历史待核对.*未确认用量未计入/);assert.match(format(v,{command:'status',now,details:true}),/争议用量记录.*2.*未计入确认用量/);
+ const report={...value.today,period:{from:'2026-10-03T00:00:00Z',to_exclusive:'2026-10-04T00:00:00Z',timezone:'UTC'},legacy_reconciliation:{conflict_records:2},daily:[],plan_cycles:[]};assert.match(format(report,{command:'report',now}),/历史待核对.*未确认用量未计入/);
 });

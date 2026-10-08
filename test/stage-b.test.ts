@@ -145,8 +145,10 @@ test('B human daily report summarizes unknown-scope observations by date and buc
  const before=JSON.stringify(report);
  for(const width of [40,80,180])for(const details of [false,true]){
   const human=format(report,{command:'report',width,details,timezone:'UTC',now:Date.parse(end)});
-  assert.doesNotMatch(human,/窗口 \d|区间分段|周期重置|原始变化/);assert.match(human,/观测摘要/);assert.match(human,/50 条/);
-  assert.equal((human.match(/观测摘要/g)??[]).length,2);assert.ok(human.split('\n').every(line=>cellWidth(line)<=width));
+  assert.doesNotMatch(human,/窗口 \d|区间分段|周期重置|原始变化/);
+  if(details){assert.match(human,/观测摘要/);assert.match(human,/50 条/);assert.equal((human.match(/观测摘要/g)??[]).length,2);}
+  else{assert.match(human,/范围不明或不可估/);assert.doesNotMatch(human,/观测摘要|50 条/);}
+  assert.ok(human.split('\n').every(line=>cellWidth(line)<=width));
  }
  assert.equal(JSON.stringify(report),before);assert.ok(report.plan_cycles.every(p=>p.estimated_tokens===null&&p.percent_points===null));
 });

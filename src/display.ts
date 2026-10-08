@@ -1,4 +1,5 @@
 import {stripVTControlCharacters} from 'node:util';
+import {readerDisplay} from './reader-display.js';
 export interface DisplayOptions {command?:string;details?:boolean;timezone?:string;width?:number;color?:boolean;now?:number;collection?:any;monitor?:any;}
 const valid=(n:unknown):n is number=>typeof n==='number'&&Number.isFinite(n);
 const exact=(n:unknown)=>valid(n)?n.toLocaleString('en-US',{maximumFractionDigits:2}):'未知';
@@ -22,6 +23,7 @@ export const errorMessages:Record<string,string>={
 export function formatError(code:string){return `操作失败：${errorMessages[code]??'操作未完成，请检查配置或运行 cux doctor --details。'}\n错误代码：${safe(code)}`;}
 export function format(value:any,options:DisplayOptions={}):string {
  const command=options.command??(value?.today?'status':value?.totals?'report':Array.isArray(value)?'estimate':value?.windows?'quota':'unknown');
+ if(!options.details&&['status','today','week','month','report'].includes(command))return readerDisplay(value,{...options,command});
  const details=!!options.details,tz=options.timezone??'Asia/Shanghai',now=options.now??Date.now();
  const width=Math.max(20,Math.min(value?.daily?220:88,options.width??80)),narrow=width<64;const rows:{text:string;style?:number}[]=[];
  const add=(text='',style?:number)=>{for(const line of String(text).split('\n'))for(const part of wrap(safe(line),width))rows.push({text:part,style});};

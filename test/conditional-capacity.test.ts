@@ -111,7 +111,7 @@ test('E daily display separates raw observations, partial equivalent and referen
  const rows=[u(.3),u(.7,100,{model:'other'})],qs=[q(0,10),q(1,12)],value=dailyReport(rows,qs,rules,range,time(10));
  assert.ok(value.plan_cycles.every(p=>p.estimated_tokens===null));assert.ok(Object.values(value.models).every(m=>m.plan_percent_points===null));assert.equal(value.observation[0].percent_points,2);
  const before=JSON.stringify(value);
- for(const width of [40,80,180]){const text=format(value,{command:'report',width,timezone:'UTC'});assert.ok(text.split('\n').every(line=>cellWidth(line)<=width));if(width===180){assert.match(text,/已知部分/);assert.match(text,/配对有效 2/);assert.match(text,/参考单位/);assert.match(text,/不是条件容量分母/);}}
+ for(const width of [40,80,180]){const text=format(value,{command:'report',width,timezone:'UTC'});assert.ok(text.split('\n').every(line=>cellWidth(line)<=width));if(width===180){assert.match(text,/已知计价部分/);assert.match(text,/≈2/);assert.match(text,/标准 Token 参考/);assert.doesNotMatch(text,/配对有效|条件窗口/);}}
  const detail=format(value,{command:'report',width:180,timezone:'UTC',details:true});assert.match(detail,/固定分子/);assert.match(detail,/价格目录 SHA/);assert.equal(JSON.stringify(value),before);
 });
 test('E immutable prediction command freezes inputs and refuses training leakage or changed prices',()=>{

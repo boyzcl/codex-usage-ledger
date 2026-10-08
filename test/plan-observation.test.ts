@@ -77,14 +77,14 @@ test('remaining trajectory preserves recovery and explains positive changes excl
  const v=dailyReport([],qs,[],range,range.to_exclusive),p=v.observation[0];
  assert.equal(p.percent_points,38);assert.equal(p.boundary_positive_percent_points,1);assert.deepEqual(p.remaining.trajectory.map(point=>point.remaining_percent),[0,100,61]);assert.equal(p.remaining.trajectory[1].event,'recovery');
  const before=JSON.stringify(v);
- for(const width of [24,40,64,80,110,140,180]){const text=format(v,{command:'report',width,timezone:'UTC'});assert.ok(text.split('\n').every(line=>cellWidth(line)<=width));if(width===180){assert.match(text,/00:03回升/);assert.match(text,/已计 38/);assert.match(text,/边界未计 1/);assert.doesNotMatch(text,/手动/);}}
+ for(const width of [24,40,64,80,110,140,180]){const text=format(v,{command:'report',width,timezone:'UTC'});assert.ok(text.split('\n').every(line=>cellWidth(line)<=width));if(width===180){assert.match(text,/00:03回升/);assert.match(text,/≈38/);assert.match(text,/边界及未覆盖时段未补算/);assert.doesNotMatch(text,/手动/);}}
  const details=format(v,{command:'report',width:180,timezone:'UTC',details:true});assert.match(details,/官方已用 起→止/);assert.match(details,/100% → 39%/);assert.match(details,/边界未计正向变化/);assert.equal(JSON.stringify(v),before);
  assert.ok(v.plan_cycles.every(c=>c.estimated_tokens===null));
 });
 test('default recovery trace is bounded, while details and JSON retain every recovery and cross-day edge stays unallocated',()=>{
  const qs=Array.from({length:10},(_,i)=>q(i+1,i%2?0:100));const v=dailyReport([],qs,[],range,range.to_exclusive);
  assert.equal(v.observation[0].remaining.trajectory.filter(p=>p.event==='recovery').length,5);
- assert.match(format(v,{command:'report',width:180,timezone:'UTC'}),/另 2 次回升/);
+ assert.match(format(v,{command:'report',width:180,timezone:'UTC'}),/5次回升/);
  assert.doesNotMatch(format(v,{command:'report',width:180,timezone:'UTC',details:true}),/另 2 次回升/);
  const days=dailyReport([],[q(1430,10),q(1440,20),q(1450,25)],[],range,range.to_exclusive);
  assert.equal(days.observation[0].percent_points,5);assert.equal(days.observation[0].boundary_positive_percent_points,10);assert.equal(days.observation[0].boundary_changes[0].reason,'day_boundary');
